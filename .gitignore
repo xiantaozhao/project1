@@ -1,0 +1,89 @@
+# -------------------------
+# 忽略所有文件
+*
+# -------------------------
+# 保留代码文件（Python, Jupyter, C/C++, etc.）
+!*.py
+!*.ipynb
+!*.c
+!*.cpp
+!*.h
+!*.hpp
+!*.cu
+!*.java
+!*.m
+!*.jl
+!*.sh
+!*.bat
+!*.R
+
+# 保留 Markdown 和 LaTeX（文档、说明用）
+!*.md
+!*.tex
+!*.bib
+!*.sty
+
+# 保留项目配置文件
+!.gitignore
+!requirements.txt
+!environment.yml
+!setup.py
+!Makefile
+!Dockerfile
+!*.yml
+!*.yaml
+
+# 保留文件夹结构
+!*/
+
+# -------------------------
+# 忽略常见的科研项目文件
+# 数据文件
+*.csv
+*.tsv
+*.xlsx
+*.xls
+*.mat
+*.h5
+*.npz
+*.npy
+*.json
+*.xml
+
+# 图像/视频
+*.png
+*.jpg
+*.jpeg
+*.bmp
+*.tif
+*.tiff
+*.gif
+*.mp4
+*.avi
+
+# 模型文件
+*.pth
+*.pt
+*.ckpt
+*.onnx
+*.pb
+*.hdf5
+*.weights
+
+# 日志/缓存
+*.log
+*.out
+*.err
+*.tmp
+*.cache
+__pycache__/
+.ipynb_checkpoints/
+.DS_Store
+._*
+
+
+# IDE 配置
+.vscode/
+.idea/
+*.swp
+*.swo
