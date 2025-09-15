@@ -509,6 +509,7 @@ def load_xml_info(subject_id: str | int,
         print(f"[load_xml_info] parsed nodules={len(nods)}  non_nodules={len(nons)}")
 
     return XmlAnnotations(nodules=nods, non_nodules=nons)
+
 def load_series_from_path(series_path: str | Path, modality: Optional[str] = None):
     """
     读取单个“序列目录”中的数据。

@@ -18,7 +18,7 @@ Usage (CLI):
         
     python -m src.data.data_analysis.data_analysis_symmetry \
         --input ./figs/projections/chest/parallel \
-        --output ./figs/projections/chest/parallel_analysis \
+        --output ./figs/projections/chest/analysis_parallel \
         --pattern "deg_*.png" \
         --dtype uint8 \
         --data-range auto \
@@ -43,6 +43,51 @@ Usage (CLI):
         --flip180 \
         --mask-dir ./figs/projections/chest/mask_edge \
         --mask-pattern "deg_*.csv"
+        
+        
+-----------------------------
+        
+    python -m src.data.data_analysis.data_analysis_symmetry \
+        --input ./figs/projections/chest/projections \
+        --output ./figs/projections/chest/analysis_90 \
+        --pattern "deg_*.png" \
+        --dtype uint8 \
+        --data-range auto \
+        --flip180 \
+        --pair-delta 90
+
+    python -m src.data.data_analysis.data_analysis_symmetry \
+        --input ./figs/projections/chest/parallel \
+        --output ./figs/projections/chest/analysis_parallel_90 \
+        --pattern "deg_*.png" \
+        --dtype uint8 \
+        --data-range auto \
+        --flip180 \
+        --pair-delta 90
+
+    python -m src.data.data_analysis.data_analysis_symmetry \
+        --input ./figs/projections/chest/projections \
+        --output ./figs/projections/chest/analysis_masked_90 \
+        --pattern "deg_*.png" \
+        --dtype uint8 \
+        --data-range auto \
+        --flip180 \
+        --mask-dir ./figs/projections/chest/mask \
+        --mask-pattern "deg_*.csv" \
+        --pair-delta 90
+
+    python -m src.data.data_analysis.data_analysis_symmetry \
+        --input ./figs/projections/chest/projections \
+        --output ./figs/projections/chest/analysis_masked_edge_90 \
+        --pattern "deg_*.png" \
+        --dtype uint8 \
+        --data-range auto \
+        --flip180 \
+        --mask-dir ./figs/projections/chest/mask_edge \
+        --mask-pattern "deg_*.csv" \
+        --pair-delta 90
+    
+-----------------------------
 
 Dependencies:
     pip install numpy pandas pillow scikit-image matplotlib
@@ -196,7 +241,8 @@ def pearsonr(a: np.ndarray, b: np.ndarray) -> float:
 def compute_pair_metrics(
     angle_to_img: Dict[int, np.ndarray],
     flip180: bool = True,
-    data_range: str | float = "auto",  # "auto", 1.0, or 255
+    data_range: str | float = "auto",
+    pair_delta: int = 180,   # <— 新增：默认 180°
 ) -> pd.DataFrame:
     """Compute metrics for all available (θ, θ+180) pairs.
 
@@ -214,10 +260,10 @@ def compute_pair_metrics(
     seen: Set[Tuple[int, int]] = set()
 
     for a in present:
-        b = (a + 180) % 360
+        b = (a + pair_delta) % 360   # <— 用可配置的差值
         if b not in angle_to_img:
             continue
-        key: Tuple[int, int] = (a, b) if a <= b else (b, a)
+        key: Tuple[int, int] = (min(a, b), max(a, b))  # 防重复
         if key in seen:
             continue
         seen.add(key)
@@ -323,7 +369,7 @@ def plot_pair_hist_cdf(
     saved = 0
 
     for row in pairs_df.itertuples(index=False):
-        a, b = int(row.deg_a), int(row.deg_b)
+        a, b = int(row.deg_a), int(row.deg_b) # type: ignore
         if a not in angle_to_img or b not in angle_to_img:
             if verbose:
                 print(f"[plot_pair_hist_cdf] 跳过 {a} vs {b}：角度数据缺失。")
@@ -412,7 +458,7 @@ def plot_pair_distributions(
     """
     outdir = ensure_outdir(outdir)
     for row in df.itertuples(index=False):
-        a, b = int(row.deg_a), int(row.deg_b)
+        a, b = int(row.deg_a), int(row.deg_b) # type: ignore
         A = angle_to_img[a]
         B = angle_to_img[b]
         B_aligned = np.fliplr(B) if flip180 else B
@@ -471,8 +517,16 @@ def plot_scatter_relations(df: pd.DataFrame, outdir: Path) -> None:
         plt.close()
 
 
-def save_example_pairs(angle_to_img: Dict[int, np.ndarray], df: pd.DataFrame, outdir: Path, k: int = 6, flip180: bool = True) -> None:
-    """Save example image grids for some pairs (lowest MAE / highest SSIM)."""
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+
+def save_example_pairs(
+    angle_to_img: Dict[int, np.ndarray],
+    df: pd.DataFrame,
+    outdir: Path,
+    k: int = 6,
+    flip180: bool = True
+) -> None:
+    """Save example image grids for some pairs (lowest MAE / highest SSIM), with per-row colorbars for |A-B|."""
     outdir = ensure_outdir(outdir)
     # pick top-k best (by SSIM) and worst (by MAE)
     best = df.sort_values("SSIM", ascending=False).head(k)
@@ -482,24 +536,47 @@ def save_example_pairs(angle_to_img: Dict[int, np.ndarray], df: pd.DataFrame, ou
         if rows.empty:
             return
         n = len(rows)
-        plt.figure(figsize=(6, 3 * n))
-        for i, row in enumerate(rows.itertuples(index=False), start=1):
-            a = int(row.deg_a); b = int(row.deg_b)
+
+        # 前三列等宽，第四列窄色条
+        fig = plt.figure(figsize=(10, 3.2 * n), constrained_layout=True)
+        gs = fig.add_gridspec(nrows=n, ncols=4, width_ratios=[1, 1, 1, 0.06])
+
+        for i, row in enumerate(rows.itertuples(index=False)):
+            a, b = int(row.deg_a), int(row.deg_b)  # type: ignore
             A = angle_to_img[a]
             B = angle_to_img[b]
             B_aligned = np.fliplr(B) if flip180 else B
 
-            # show A, B_aligned, and absolute diff
             diff = np.abs(A.astype(np.float32) - B_aligned.astype(np.float32))
 
-            for j, (img, title) in enumerate(((A, f"{a}°"), (B_aligned, f"{b}° (aligned)"), (diff, "|A-B|")), start=1):
-                ax = plt.subplot(n, 3, (i - 1) * 3 + j)
-                ax.imshow(img, cmap="gray")
-                ax.set_title(title)
-                ax.axis("off")
-        plt.tight_layout()
-        plt.savefig(outdir / f"examples_{tag}.png", dpi=150)
-        plt.close()
+            # uint8 -> [0,255]；float -> [0,1]
+            is_float = np.issubdtype(A.dtype, np.floating) or np.issubdtype(B_aligned.dtype, np.floating)
+            vmin, vmax = (0.0, 1.0) if is_float else (0.0, 255.0)
+
+            # 三个等宽等高图轴 + 一个色条轴
+            axA = fig.add_subplot(gs[i, 0])
+            axB = fig.add_subplot(gs[i, 1])
+            axD = fig.add_subplot(gs[i, 2])
+            cax = fig.add_subplot(gs[i, 3])  # ← 用 add_subplot 创建 colorbar 轴
+
+            # 左：A
+            axA.imshow(A, cmap="gray", vmin=vmin, vmax=vmax)
+            axA.set_title(f"{a}°"); axA.axis("off")
+
+            # 中：B_aligned
+            axB.imshow(B_aligned, cmap="gray", vmin=vmin, vmax=vmax)
+            axB.set_title(f"{b}° (aligned)"); axB.axis("off")
+
+            # 右：|A-B| + 本行独立色条
+            im = axD.imshow(diff, cmap="gray", vmin=vmin, vmax=vmax)
+            axD.set_title("|A-B|"); axD.axis("off")
+
+            cb = fig.colorbar(im, cax=cax, orientation="vertical")
+            cb.set_label("Pixel diff (0–255)" if not is_float else "Pixel diff (0–1)")
+
+        fig.savefig(outdir / f"examples_{tag}.png", dpi=150)
+        plt.close(fig)
+
 
     _plot_rows(best, "best")
     _plot_rows(worst, "worst")
@@ -518,6 +595,7 @@ def run_pipeline(
     flip180: bool,
     mask_dir: Optional[Path] = None,
     mask_pattern: str = "deg_*.csv",
+    pair_delta: int = 180,    # <— 新增，默认 180°，可配置角度
 ) -> Path:
     output_dir = ensure_outdir(output_dir)
     angle_to_img = load_projections(input_dir, pattern=pattern, dtype=dtype)
@@ -533,7 +611,9 @@ def run_pipeline(
         else:
             print(f"No masks matched {mask_pattern} under {mask_dir}; proceed without masking.")
 
-    df_metrics = compute_pair_metrics(angle_to_img, flip180=flip180, data_range=data_range)
+    df_metrics = compute_pair_metrics(
+        angle_to_img, flip180=flip180, data_range=data_range, pair_delta=pair_delta
+    )
     metrics_csv = output_dir / "metrics_180pairs.csv"
     df_metrics.to_csv(metrics_csv, index=False)
 
@@ -542,13 +622,13 @@ def run_pipeline(
     plot_metric_distributions(df_metrics, output_dir / "plots")
     plot_metric_vs_angle(df_metrics, output_dir / "plots")
     plot_scatter_relations(df_metrics, output_dir / "plots")
-    save_example_pairs(angle_to_img, df_metrics, output_dir / "plots", k=6, flip180=flip180)
+    save_example_pairs(angle_to_img, df_metrics, output_dir / "plots", k=20, flip180=flip180)
 
     print("Generating pair histograms...")
     plot_pair_distributions(angle_to_img, df_metrics, output_dir / "pair_hists", bins=50, flip180=flip180)
 
-    print("Generating pair hist+CDF plots...")
-    plot_pair_hist_cdf(angle_to_img, df_metrics, output_dir / "pair_hist_cdf", bins=None, flip180=flip180, top_k=None, sort_by="MAE", largest=True)
+    # print("Generating pair hist+CDF plots...")
+    # plot_pair_hist_cdf(angle_to_img, df_metrics, output_dir / "pair_hist_cdf", bins=None, flip180=flip180, top_k=None, sort_by="MAE", largest=True)
 
     return metrics_csv
 
@@ -562,6 +642,11 @@ def build_argparser() -> argparse.ArgumentParser:
     p.add_argument("--dtype", type=str, choices=["uint8", "float32"], default="uint8", help="Array dtype when reading PNGs")
     p.add_argument("--data-range", type=str, default="auto", help="'auto', '1.0', or '255'")
     p.add_argument("--flip180", action="store_true", help="Flip (θ+180) image horizontally before comparison")
+    
+    p.add_argument(
+        "--pair-delta", type=int, default=180,
+        help="Angle difference Δ for pairing (default: 180). Example: 90 pairs θ with θ+90."
+    )
 
     # -------- 新增：mask 相关，可选 --------
     p.add_argument("--mask-dir", type=str, default=None,
@@ -594,6 +679,7 @@ def main():
         flip180=args.flip180,
         mask_dir=Path(args.mask_dir) if args.mask_dir is not None else None,
         mask_pattern=args.mask_pattern,
+        pair_delta=args.pair_delta, 
     )
     print(f"Saved metrics to: {metrics_csv}")
 
