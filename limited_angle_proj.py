@@ -13,14 +13,14 @@ from skimage.filters import threshold_otsu
 # Config
 # ===============================
 BASE_DIR = Path(__file__).resolve().parent
-OUTDIR = BASE_DIR / "output" / "limited_angle_proj"
+OUTDIR = BASE_DIR / "output" / "limited_angle_proj_Phantom"
 os.makedirs(OUTDIR, exist_ok=True)
 
 IMG_SIZE = (256, 256)         # simulate first on 256x256
 PIXEL_MM = 0.8                # pixel size (mm)
 MU_WATER = 0.02               # mm^-1, for HU->mu conversion  mu = mu_water * (1 + HU/1000)
 
-USE_DICOM = True  # whether to load a real DICOM slice from LIDC-IDRI for demo
+USE_DICOM = False  # whether to load a real DICOM slice from LIDC-IDRI for demo
 
 # Geometry (defaults you approved)
 DSO = 600.0   # mm, source to isocenter
@@ -28,8 +28,11 @@ DSD = 1000.0  # mm, source to detector
 # derived detector-to-isocenter distance
 DID = DSD - DSO
 
+MODE = "rebin"
+FILT = "ram-lak"
+
 # detector
-N_DET = 800             # number of detector channels (moderate for runtime)
+N_DET = 700             # number of detector channels (moderate for runtime)
 DET_PITCH = 1.0         # mm
 U0 = 0.0                # detector center offset (channels)
 
@@ -40,8 +43,8 @@ RANGES = {
     "0_180": (0.0, 180.0),
     "0_360": (0.0, 360.0),
 }
-N_VIEWS_DEFAULT = 200
-N_LIST = [50, 100, 150, 200, 250, 300]
+N_VIEWS_DEFAULT = 250
+N_LIST = [100, 150, 200, 250, 300, 350, 400]
 
 # filters
 def ram_lak_filter(n: int, du: float, hann_cutoff: float = None) -> np.ndarray:
@@ -68,29 +71,44 @@ def make_hu_phantom(size: Tuple[int, int]) -> np.ndarray:
     yy, xx = np.mgrid[0:H, 0:W]
     cx, cy = W / 2.0, H / 2.0
 
-    img = np.full((H, W), -1000.0, dtype=np.float32)  # air
-    # body soft tissue ellipse
-    a1, b1 = 0.40*W, 0.48*H
+    img = np.full((H, W), -1000.0, dtype=np.float32)  # background air
+
+    # ---- Big soft-tissue ellipse (中心对称, 居中) ----
+    a1, b1 = 0.38*W, 0.5*H
     mask1 = (((xx-cx)/a1)**2 + ((yy-cy)/b1)**2) <= 1.0
     img[mask1] = 40.0
 
-    # bone
-    a2, b2 = 0.13*W, 0.18*H
-    mask2 = (((xx-(cx-0.12*W))/a2)**2 + ((yy-(cy-0.12*H))/b2)**2) <= 1.0
-    img[mask2] = 900.0
+    # ---- Bone-like ellipse (左右对称) ----
+    a2, b2 = 0.12*W, 0.18*H
+    dx2, dy2 = 0.12*W, 0.15*H
+    # 左
+    mask2L = (((xx-(cx-dx2))/a2)**2 + ((yy-(cy-dy2))/b2)**2) <= 1.0
+    # 右
+    mask2R = (((xx-(cx+dx2))/a2)**2 + ((yy-(cy-dy2))/b2)**2) <= 1.0
+    img[mask2L | mask2R] = 800.0
 
-    # second bone-ish
-    a3, b3 = 0.1*W, 0.08*H
-    angle = np.deg2rad(30.0)
-    xr = (xx-(cx+0.15*W))*np.cos(angle) + (yy-(cy+0.10*H))*np.sin(angle)
-    yr = -(xx-(cx+0.15*W))*np.sin(angle) + (yy-(cy+0.10*H))*np.cos(angle)
-    mask3 = (xr/a3)**2 + (yr/b3)**2 <= 1.0
-    img[mask3] = 500.0
+    # ---- Rotated ellipse (左右对称) ----
+    a3, b3 = 0.10*W, 0.08*H
+    angle = np.deg2rad(25.0)
+    dx3, dy3 = 0.15*W, 0.10*H
+    # 左
+    xrL = (xx-(cx-dx3))*np.cos(angle) + (yy-(cy+dy3))*np.sin(angle)
+    yrL = -(xx-(cx-dx3))*np.sin(angle) + (yy-(cy+dy3))*np.cos(angle)
+    mask3L = (xrL/a3)**2 + (yrL/b3)**2 <= 1.0
+    # 右
+    xrR = (xx-(cx+dx3))*np.cos(angle) + (yy-(cy+dy3))*np.sin(angle)
+    yrR = -(xx-(cx+dx3))*np.sin(angle) + (yy-(cy+dy3))*np.cos(angle)
+    mask3R = (xrR/a3)**2 + (yrR/b3)**2 <= 1.0
+    img[mask3L | mask3R] = 450.0
 
-    # fat-like low density
-    a4, b4 = 0.22*W, 0.12*H
-    mask4 = (((xx-(cx*0.9))/a4)**2 + ((yy-(cy*1.05))/b4)**2) <= 1.0
-    img[mask4] = -80.0
+    # ---- Low-density ellipse (上下对称, 居中) ----
+    a4, b4 = 0.20*W, 0.12*H
+    # 上
+    mask4U = (((xx-cx)/a4)**2 + ((yy-(cy-0.12*H))/b4)**2) <= 1.0
+    # 下
+    mask4D = (((xx-cx)/a4)**2 + ((yy-(cy+0.12*H))/b4)**2) <= 1.0
+    img[mask4U | mask4D] = -80.0
+
     return img
 
 def hu_to_mu(hu: np.ndarray, mu_water: float = MU_WATER) -> np.ndarray:
@@ -329,6 +347,89 @@ def resize_to(img: np.ndarray, out_shape: Tuple[int, int]) -> np.ndarray:
     )
     return bilinear_sample(img, xx, yy).astype(np.float32)
 
+def to_uint8(img: np.ndarray) -> np.ndarray:
+    img = img.astype(np.float32)
+    imin, imax = img.min(), img.max()
+    if imax > imin:
+        img = (img - imin) / (imax - imin) * 255.0
+    else:
+        img = np.zeros_like(img)
+    return img.astype(np.uint8)
+
+def make_center_circle_mask(h: int, w: int, cy: float, cx: float, r: float) -> np.ndarray:
+    """在 (cy, cx) 为圆心、半径 r 的圆内为 True 的掩码。"""
+    yy, xx = np.ogrid[:h, :w]
+    return (yy - cy)**2 + (xx - cx)**2 <= r**2
+
+def ssim_circle(gt_img: np.ndarray, rec_img: np.ndarray,
+                center: tuple[float, float] | None = None,
+                radius: float | None = None,
+                data_range: float = 1.0) -> float:
+    """
+    只在中心圆形区域内计算 SSIM。
+    - center: (cy, cx)；默认取整幅图中心
+    - radius: 圆半径；默认取能内切图像的半径 min(h, w)/2 * 0.98
+    """
+    assert gt_img.shape == rec_img.shape, f"shape mismatch: {gt_img.shape} vs {rec_img.shape}"
+    h, w = gt_img.shape[:2]
+
+    if center is None:
+        cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
+    else:
+        cy, cx = float(center[0]), float(center[1])
+
+    if radius is None:
+        radius = 0.98 * min(h, w) / 2.0  # 给点余量避免触边
+    r = float(radius)
+
+    # 计算 SSIM map
+    score, ssim_map = ssim(gt_img, rec_img, data_range=data_range, full=True)
+
+    # 掩码内求均值
+    mask = make_center_circle_mask(h, w, cy, cx, r)
+    masked_score = float(ssim_map[mask].mean())
+    return masked_score
+
+
+# ========= 新增：为单个 N 生成四联图 =========
+def make_panel_with_ssim_from_results(results: dict, N: int, mode: str = MODE, filt: str = FILT, save_name: str | None = None):
+    """
+    使用已有 results 字典里的重建图，计算 SSIM，并生成四联图（标题带 SSIM）。
+    """
+    per_range_recon = {}
+    per_range_ssim = {}
+
+    for rn in range_names:
+        rec = results[rn]["recon"]
+
+        # 对齐姿态
+        rec_aligned = rot90_cw(rec)
+
+        # 尺寸对齐
+        if rec_aligned.shape != gt_n.shape:
+            rec_aligned = resize_to(rec_aligned, gt_n.shape)
+
+        rec_n = to_float01(rec_aligned)
+        score = float(ssim_circle(gt_n, rec_n))
+
+        per_range_recon[rn] = rec_aligned
+        per_range_ssim[rn] = score
+
+    # 画四联图
+    fig, axes = plt.subplots(1, len(range_names), figsize=(3 * len(range_names), 3), constrained_layout=True)
+    for i, rn in enumerate(range_names):
+        axes[i].imshow(to_uint8(per_range_recon[rn]), cmap="gray", vmin=0, vmax=255)
+        axes[i].axis("off")
+        axes[i].set_title(f"{rn} | SSIM={per_range_ssim[rn]:.3f}")
+
+    fig.suptitle(f"Fan-beam -> FBP (mode={mode}, filter={filt}), N={N}")
+    out_name = save_name if save_name is not None else f"recon_panel_N{N}.png"
+    fig.savefig(OUTDIR / out_name, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"[Info] Saved recon panel with SSIM for N={N} -> {OUTDIR / out_name}")
+
+
 
 # ===============================
 # Run one range
@@ -381,9 +482,6 @@ def run_one_range(range_name: str, N_views: int, mode: str = "rebin", filt: str 
     return recon, sino_fan, {"beta_deg": beta, "par": par_info}
 
 
-MODE = "rebin"
-FILT = "ram-lak"
-
 results = {}
 for rn in range_names:
     rec, sino, info = run_one_range(rn, N_VIEWS_DEFAULT, mode=MODE, filt=FILT,
@@ -398,29 +496,14 @@ for rn in range_names:
         sino, cmap='gray', aspect='auto', origin='lower',
         extent=[0, sino.shape[1]-1, float(beta_deg.min()), float(beta_deg.max())]
     )
-    plt.xlabel("detector")
+    plt.xlabel("detector (mm)")
     plt.ylabel("angle (deg)")
     plt.title(f"Fan-beam sinogram {rn} (N={N_VIEWS_DEFAULT})")
     plt.savefig(OUTDIR / f"sino_{rn}.png", bbox_inches='tight')
     plt.close()
 
-    # 2) 重建图：同样旋转90°顺时针
-    plt.figure()
-    plt.imshow(rot90_cw(rec), cmap='gray')
-    plt.title(f"Recon {rn} (N={N_VIEWS_DEFAULT}, {MODE}/{FILT})")
-    plt.axis('off')
-    plt.savefig(OUTDIR / f"recon_{rn}.png", bbox_inches='tight')
-    plt.close()
 
 
-fig, axes = plt.subplots(1, len(range_names), figsize=(3*len(range_names), 3), constrained_layout=True)
-for i, rn in enumerate(range_names):
-    axes[i].imshow(rot90_cw(results[rn]["recon"]), cmap='gray')
-    axes[i].set_title(rn)
-    axes[i].axis('off')
-fig.suptitle(f"Fan-beam -> FBP (mode={MODE}, filter={FILT}), N={N_VIEWS_DEFAULT}")
-fig.savefig(OUTDIR / f"recon_panel_N{N_VIEWS_DEFAULT}.png", bbox_inches='tight')
-plt.close(fig)
 
 # --- SSIM vs Ground Truth ---
 def to_float01(a: np.ndarray) -> np.ndarray:
@@ -432,6 +515,8 @@ def to_float01(a: np.ndarray) -> np.ndarray:
 
 GT = BASE_MU  # 作为 ground truth
 gt_n = to_float01(GT)
+
+# make_panel_with_ssim(N_VIEWS_DEFAULT, mode=MODE, filt=FILT, save_name=f"recon_panel_N{N_VIEWS_DEFAULT}.png")
 
 # 依据 GT 取前景 ROI（示例：Otsu）
 thr = threshold_otsu(gt_n)
@@ -453,18 +538,32 @@ for rn in range_names:
     # 如有尺寸不一致（例如你把 DICOM 重采样到 256x256），需要在这一步对齐尺寸
     assert gt_n.shape == rec_n.shape, f"SSIM shape mismatch: GT{gt_n.shape} vs REC{rec_n.shape}"
 
-    ssim_scores[rn] = ssim_roi(gt_n, rec_n)
+    ssim_scores[rn] = ssim_circle(gt_n, rec_n)
 
 # 画柱状图
 plt.figure(figsize=(6, 3))
-plt.bar(range_names, [ssim_scores[rn] for rn in range_names])
+vals = [ssim_scores[rn] for rn in range_names]
+bars = plt.bar(range_names, vals)
+
 plt.ylabel("SSIM vs Ground Truth")
 plt.xlabel("Angle Range")
 plt.ylim(0, 1)
 plt.grid(axis='y', alpha=0.3)
-plt.title(f"SSIM vs GT (GT={'DICOM' if USE_DICOM else 'Phantom'})")
+plt.title("SSIM vs GT")
+
+# 在柱子上方标注数值
+for bar, val in zip(bars, vals):
+    height = bar.get_height()
+    plt.text(
+        bar.get_x() + bar.get_width() / 2,   # x 坐标：柱子中心
+        height + 0.02,                      # y 坐标：柱顶稍微上方
+        f"{val:.3f}",                       # 显示到小数点后三位
+        ha='center', va='bottom', fontsize=8
+    )
+
 plt.savefig(OUTDIR / "ssim_vs_gt.png", bbox_inches='tight')
 plt.close()
+
 
 
 rows = []
@@ -482,7 +581,7 @@ for rn in range_names:
             rec_aligned = resize_to(rec_aligned, gt_n.shape)
 
         rec_n = to_float01(rec_aligned)
-        score = ssim_roi(gt_n, rec_n)
+        score = ssim_circle(gt_n, rec_n)
 
         RECONS_ROOT = OUTDIR / "ssim_vs_N_recons"
         os.makedirs(RECONS_ROOT, exist_ok=True)
@@ -503,9 +602,18 @@ for rn in range_names:
         print(f"[Info] SSIM for range {rn}, N={N}: {score:.4f}")
     plt.plot(N_LIST, ssim_vals, marker="o", label=rn)
 
+
 plt.xlabel("Number of views (N)")
 plt.ylabel("SSIM vs GT")
-plt.ylim(0.4, 0.75)  # 视数据可调
+
+# ==== 动态 Y 轴范围 ====
+all_ssim = [r["SSIM"] for r in rows]
+margin = 0.05
+ymin = max(0.0, np.floor((min(all_ssim) - margin) * 10) / 10.0)
+ymax = min(1.0, np.ceil((max(all_ssim) + margin) * 10) / 10.0)
+plt.ylim(ymin, ymax)
+# ====================
+
 plt.grid(alpha=0.3)
 plt.legend()
 plt.title("SSIM vs N for angle ranges")
@@ -517,6 +625,9 @@ plt.close()
 df_ssim_n = pd.DataFrame(rows).sort_values(["range", "N"])
 df_ssim_n.to_csv(OUTDIR / "ssim_vs_N.csv", index=False)
 print(f"[Info] Saved SSIM vs N figure and CSV to: {OUTDIR}")
+
+for N in N_LIST:
+    make_panel_with_ssim_from_results(results, N_VIEWS_DEFAULT, mode=MODE, filt=FILT, save_name=f"recon_panel_N{N_VIEWS_DEFAULT}.png")
 
 OUTDIR, [str((OUTDIR / f"recon_{rn}.png")) for rn in ["0_90","90_180","0_180","0_360"]], str(OUTDIR / f"recon_panel_N{N_VIEWS_DEFAULT}.png")
 

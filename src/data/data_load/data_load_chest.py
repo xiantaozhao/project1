@@ -37,7 +37,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Iterable, Set, Literal
 
-# 全局关闭ITK级别warning显示（可再配合stderr重定向）
+# 全局关闭ITK级别warning显示
 try:
     sitk.ProcessObject.SetGlobalWarningDisplay(False)
 except Exception:
@@ -45,7 +45,7 @@ except Exception:
 
 
 
-# 设置默认相对路径（相对于当前文件 data_load_chest.py）
+# 设置默认相对路径
 META_CSV = os.path.join(
     os.path.dirname(__file__),
     "../../../data/raw/chest/manifest-1600709154662/metadata.csv"
