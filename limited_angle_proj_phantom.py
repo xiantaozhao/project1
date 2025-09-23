@@ -13,14 +13,14 @@ from skimage.filters import threshold_otsu
 # Config
 # ===============================
 BASE_DIR = Path(__file__).resolve().parent
-OUTDIR = BASE_DIR / "output" / "limited_angle_proj"
+OUTDIR = BASE_DIR / "output" / "limited_angle_proj_Phantom_extra"
 os.makedirs(OUTDIR, exist_ok=True)
 
 IMG_SIZE = (256, 256)         # simulate first on 256x256
 PIXEL_MM = 0.8                # pixel size (mm)
 MU_WATER = 0.02               # mm^-1, for HU->mu conversion  mu = mu_water * (1 + HU/1000)
 
-USE_DICOM = True  # whether to load a real DICOM slice from LIDC-IDRI for demo
+USE_DICOM = False  # whether to load a real DICOM slice from LIDC-IDRI for demo
 
 # Geometry (defaults you approved)
 DSO = 600.0   # mm, source to isocenter
@@ -44,7 +44,7 @@ RANGES = {
     "0_360": (0.0, 360.0),
 }
 N_VIEWS_DEFAULT = 250
-N_LIST = [200, 250, 300, 350, 400, 450, 500]
+N_LIST = [500, 600, 700, 800]
 
 # filters
 def ram_lak_filter(n: int, du: float, hann_cutoff: float = None) -> np.ndarray:
