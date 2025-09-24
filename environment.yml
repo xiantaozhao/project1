@@ -8,4 +8,6 @@ dependencies:
   - torchvision==0.16.0
   - torchaudio==2.1.0
   - astra-toolbox
+  - conda-forge::imageio
+  - anaconda::scikit-image
 prefix: /home/z/zhaox/.conda/envs/proj
