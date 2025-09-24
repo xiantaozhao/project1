@@ -1,37 +1,43 @@
+# configs/FBP/chest.yaml
 inherit_from: "configs/default/chest.yaml"
-exp:
-  expname: chest_50
-  expdir: ./logs/FDK/
-  datadir: ./data/chest/raw/chest
-network:
-  net_type: mlp
-  num_layers: 4
-  hidden_dim: 32
-  skips: [2]
-  out_dim: 1
-  last_activation: sigmoid
-  bound: 0.3
-encoder:
-  encoding: hashgrid
-  input_dim: 3
-  num_levels: 16
-  level_dim: 2
-  base_resolution: 16
-  log2_hashmap_size: 19
-render:
-  n_samples: 192    # 第一次在每一条射线上采样点的数量，粗采样
-  n_fine: 0         # 第二次采样点，细采样，此处设置成0，表示不细采样
-  perturb: True
-  raw_noise_std: 0.
-  netchunk: 409600  # NeRF模型每一次处理点的个数, batchsize of points
-train:
-  epoch: 1500
-  n_batch: 1
-  n_rays: 1024
-  lrate: 0.001
-  lrate_gamma: 0.1
-  lrate_step: 1500
-  resume: False
-log:
-  i_eval: 250  # Epoch for evaluation
-  i_save: 500  # Epoch for saving
+
+fbp:
+  # 算法/设备
+  algo: "FBP_CUDA"          # 固定使用 GPU 版
+  projector: "cuda"         # 与 ASTRA-CUDA 匹配
+  gpu_index: 0              # 可按需改
+
+  # 重建网格（与投影几何在 default 中保持一致；这里只管输出大小等）
+  recon:
+    img_size: [512, 512]    # 输出 [H, W]；与 default 可不同
+    crop_to_circle: false   # 你明确不要裁切
+    pixel_mm: null          # 如需写 spacing 可在这里指定（仅作元数据保存/记录）
+
+  # FBP 滤波器（可在这儿调参；默认 Ram-Lak）
+  filter:
+    type: "Ram-Lak"         # 可切: shepp-logan/cosine/hamming/hann/...
+    d_param: null           # 针对部分滤波器的 D 参数
+    parameter: null         # 针对部分滤波器的附加参数
+    cutoff: 0.9             # 频率缩放(可 <1.0 略降噪)
+
+  # 短扫描（有限角<180°时这里一般不开；需要 Parker 再启用）
+  short_scan:
+    enabled: false
+    pixel_supersampling: 2
+
+  # 输出/后处理
+  post:
+    normalize: "minmax_per_slice"  # 先归一化到 [0,1]（按每个 slice）
+    # normalize: "percentile"  # 显示/落盘的归一化策略
+    percentiles: [1.0, 95.0] # 抑制少量极亮条纹的影响
+    scale: 1.0
+    clip: [0.0, 1.0]               # 灰度范围
+    dtype: "float32"
+
+  # 保存选项
+  io:
+    out_root: "outputs/FBP"        # 统一输出目录
+    save_npz_all: true             # 保存整体重建到 .npz
+    save_png_each_slice: true      # 逐 slice 存 PNG
+    png_cmap: "gray"               # 可改其他 cmap；仅用于可视化
+    case_prefix: "recon_{case_id}_{stop}@{step}"   # 文件名前缀模板 

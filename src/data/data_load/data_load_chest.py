@@ -16,7 +16,7 @@ As a module:
     from src.data import data_load_chest
 
     # Load CT volume
-    vol, meta, spacing = data_load_chest.load_data_chest("1", "CT")
+    vol_HU_zyx, spacing_dzyx, meta = data_load_chest.load_data_chest("1", "CT")
 
     # Load XML annotations
     anns = data_load_chest.load_xml_info("1", "CT")
