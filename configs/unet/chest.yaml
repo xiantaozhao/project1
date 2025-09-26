@@ -40,9 +40,11 @@ data:
   # torch.utils.data.DataLoader 相关参数
   patch_size: [256, 256]
   batch_size: 8
-  num_workers: 2
+  num_workers: 8
   pin_memory: true
   shuffle: true
+
+  
 
 split:
   # 划分方式：
@@ -59,12 +61,12 @@ split:
 
   # 验证集包含的病人 id
   # 这里 patient 1 单独做验证
-  val_patients: [1]
+  val_patients: [5]
 
   # 测试集包含的病人 id
   # 这里暂时设为空列表，表示不留测试集
   # 如果以后要测试，比如留 patient 4 做最终评估，就写 [4]
-  test_patients: [5]
+  test_patients: [1]
 
 
 task:

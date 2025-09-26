@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset, Sampler
 
-# 你已有的 HU 读取函数
+# 已有的 HU 读取函数
 from src.data.data_load import data_load_chest
 
 
@@ -288,32 +288,40 @@ class UnetSampler(Sampler[List[int]]):
     """
     让 DataLoader 产出的每个 batch 只包含“同一个病人”的切片。
     - group_by="patient"：按病人分组（默认）
-    - group_by="patient_angle"：按 (patient, stop_deg, step_deg) 分组（如果你也不想混合角度）
+    - group_by="patient_angle"：按 (patient, stop_deg, step_deg) 分组（不混角度）
 
     用法：
-      sampler = GroupByPatientBatchSampler(dataset, batch_size=8, shuffle=True, drop_last=False, group_by="patient")
+      sampler = UnetSampler(dataset, batch_size=8, shuffle=True, drop_last=False, group_by="patient")
       loader = DataLoader(dataset, batch_sampler=sampler, num_workers=..., pin_memory=...)
     """
-    def __init__(self, dataset: UnetDataset, batch_size: int,
+    def __init__(self, dataset: "UnetDataset", batch_size: int,
                  shuffle: bool = True, drop_last: bool = False,
                  group_by: str = "patient"):
-        super().__init__(dataset)
+        # 兼容 PyTorch 2.2+：Sampler.__init__() 不再接收 data_source
+        super().__init__()  # ← 关键修改：不要传 dataset
+
         self.dataset = dataset
         self.batch_size = int(batch_size)
         self.shuffle = bool(shuffle)
         self.drop_last = bool(drop_last)
+
         if group_by not in ("patient", "patient_angle"):
             raise ValueError("group_by must be 'patient' or 'patient_angle'")
         self.group_by = group_by
 
-        # 为每个样本准备分组键
-        # patient 已在 dataset.sample_patient 里；角度需要从文件名解析
-        # 先把每个 index -> (patient, stop, step) 缓存起来
+        # 解析文件名中的角度信息，用于 (patient, stop, step) 键
+        # 允许 filename_re 缺失时报出更清晰的错误
+        if not hasattr(dataset, "filename_re") or not isinstance(dataset.filename_re, re.Pattern):
+            raise AttributeError("dataset.filename_re 未设置或不是有效的正则，请在 UnetDataset 中提供命名组 'end' 和 'step'")
+
         self._index_group_key: List[Tuple[str, float, float]] = []
         for (file_idx, _), patient in zip(dataset.index_map, dataset.sample_patient):
             p = dataset.files[file_idx]
             m = dataset.filename_re.match(p.name)
-            stop_deg = float(m.group("end")); step_deg = float(m.group("step"))
+            if m is None:
+                raise ValueError(f"文件名不匹配正则：{p.name}  正则：{dataset.filename_re.pattern}")
+            stop_deg = float(m.group("end"))
+            step_deg = float(m.group("step"))
             self._index_group_key.append((patient, stop_deg, step_deg))
 
         # 构建 分组 -> indices
@@ -322,29 +330,35 @@ class UnetSampler(Sampler[List[int]]):
             key = patient if self.group_by == "patient" else (patient, stop, step)
             self.groups[key].append(idx)
 
-        # 统计 batch 数
+        # 预计算批次数（供 __len__ 使用）
         self._num_batches = 0
+        B = self.batch_size
         for idxs in self.groups.values():
-            nb = len(idxs) // self.batch_size
-            if not self.drop_last and (len(idxs) % self.batch_size):
+            nb = len(idxs) // B
+            if not self.drop_last and (len(idxs) % B):
                 nb += 1
             self._num_batches += nb
 
     def __len__(self) -> int:
+        # 返回“本 epoch 将产生的 batch 数”
         return self._num_batches
 
     def __iter__(self) -> Iterable[List[int]]:
+        # 先随机组顺序，再组内随机
         keys = list(self.groups.keys())
         if self.shuffle:
             random.shuffle(keys)
+
+        B = self.batch_size
         for k in keys:
             idxs = self.groups[k][:]
             if self.shuffle:
                 random.shuffle(idxs)
-            # 逐组切块
-            B = self.batch_size
+
             full = (len(idxs) // B) * B
+            # 完整批
             for s in range(0, full, B):
                 yield idxs[s:s+B]
+            # 余数批
             if not self.drop_last and full < len(idxs):
                 yield idxs[full:]
