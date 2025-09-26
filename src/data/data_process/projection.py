@@ -280,6 +280,8 @@ def project_volume_with_astra(
             os.makedirs(os.path.dirname(fpath), exist_ok=True)
             img_resized.save(fpath)
 
+        print(f"[Projection] Saved projection PNGs to: {out_dir}")
+
     # ---- 6) 保存 sinogram----
     save_cfg = cfg['projection']['save']
     if save_cfg['enabled']:
@@ -288,5 +290,7 @@ def project_volume_with_astra(
         os.makedirs(out_dir, exist_ok=True)
         out_name = save_cfg['filename'].format(case_id=case_id, range=rng_str)
         np.save(os.path.join(out_dir, out_name), sino_out)
+
+        print(f"[Projection] Saved sinogram to: {os.path.join(out_dir, out_name)}")
 
     return sino_out  # [S, A, D]

@@ -1,4 +1,178 @@
-# src/model/FBP.py
+# -*- coding: utf-8 -*-
+"""
+File: src/model/FBP.py
+Author: <Ming>
+Purpose:
+    使用 ASTRA Toolbox 完成 2D FBP 重建（逐 z-slice），并对 3D 体 [S,H,W] 进行
+    可选的圆形 FOV 遮罩、归一化与落盘。仅修改“重建端 [reconstruction side]”参数；
+    前向投影的几何/角度从已合并的配置里读取（继承自 configs/default/...）。
+
+Input:
+    sino_SAD : np.ndarray
+        Shape [S, A, D]
+        - S: slice 数 (沿 z 轴逐 slice 重建)
+        - A: angle 数 (必须与 cfg.projection.angles 生成的一致)
+        - D: 探测器通道数 (detector bins)
+
+    cfg_merged : Dict
+        已合并的配置字典 (default.yaml + FBP.yaml)
+        - 提供角度范围、几何参数、滤波器、重建大小、后处理、IO 路径等
+
+    case_id : str | int, default="case"
+        文件名前缀里的 {case_id}
+
+    ground_truth_zyx : np.ndarray | None, default=None
+        可选的参考体数据，Shape [S, H, W]
+        - 若提供，则保存为 PNG 到 groudtruth/ 目录
+        - 不参与重建和数值计算
+
+    spacing_dzyx : tuple(float,float,float) | None
+        (dz, dy, dx) in mm
+        - 若提供，用于构建 ASTRA vol_geom 的物理尺寸
+        - 否则尝试从 cfg.data.spacing 中读取
+
+Output:
+    recon : np.ndarray
+        Shape [S, H, W], dtype=float32
+        - 每 slice 重建图像
+        - 已根据 cfg.fbp.post 进行归一化/裁剪/dtype 转换
+        - 默认范围 [0,1]
+
+
+Key Dependencies:
+    - astra (GPU: 'FBP_CUDA' + 'cuda' projector; CPU: 'FBP' + 'line' projector)
+    - numpy
+    - imageio (可选，仅用于保存 PNG)
+    - 项目内的 load_config: 需返回已做 inherit 的 cfg（含 default+FBP）
+
+Expected Config Schema (摘录):
+    cfg["projection"]["angles"]:
+        mode: "range_step"
+        start_deg: float
+        stop_deg : float
+        step_deg : float
+        include_endpoint: bool
+    cfg["projection"]["geom"]:
+        type: "fanflat" | "parallel"
+        det:
+            from_image: bool
+            det_pixel_mm: float | "auto"
+        source_origin_mm: float  # DSO
+        origin_det_mm  : float  # ODD
+    cfg["data"]["spacing"]:
+        enabled: bool
+        order  : "dzyx"  # (dz,dy,dx)
+        values : [dz,dy,dx]  # mm
+    cfg["fbp"]:
+        algo      : "FBP_CUDA" | "FBP"
+        projector : "cuda" | "line"
+        recon:
+            img_size: [H, W]
+            crop_to_circle: bool (未在算法内裁切，仅 post 可遮罩)
+        filter:
+            type: "ram-lak" | "hann" | "hamming" | "shepp-logan" | ...
+            d_param    : Optional[float]
+            parameter  : Optional[float]
+            cutoff     : Optional[float] (not always used by ASTRA)
+        short_scan:
+            enabled: bool       # Parker weighting
+            pixel_supersampling: int  # 'PixelSuperSampling'
+        post:
+            # 归一化 [normalization]：三选一
+            # - "minmax_per_slice": 每 slice min-max 到 [0,1]
+            # - "percentile"     : 每 slice 用百分位 [p_lo,p_hi] 归一化到 [0,1]
+            # - "none"/None      : 不做归一化
+            normalize: "minmax_per_slice" | "percentile" | "none"
+            percentiles: [p_lo, p_hi]  # 当 normalize="percentile" 时有效
+            mask_circle: bool          # 是否应用圆形 FOV 遮罩（外圈置零）
+            mask_radius_factor: float  # 遮罩半径 = 0.5*min(H,W)*factor
+            scale: float               # 归一化后的整体缩放
+            clip : [lo, hi] | null     # 归一化/缩放后的裁剪范围
+            dtype: "float32" | ...
+        io:
+            out_root: "outputs/FBP"
+            save_npz_all: bool
+            save_png_each_slice: bool
+            case_prefix: "recon_{case_id}_{stop}@{step}"
+
+Shapes & Conventions:
+    - Sinogram [sino_SAD]: [S, A, D]
+        S: slice 数（沿 cfg["projection"]["slice_axis"]="z" 切）
+        A: angle 数（必须与 cfg 中生成的 angles 长度一致）
+        D: detector 通道数（本文件以输入 sino 的 D 为准）
+        单 slice 期望为 [A, D]（若收到 [D, A] 会自动转置）
+        数值应为线积分 [line integral], i.e., -log(I/I0)
+
+    - Reconstruction [recon]: [S, H, W]
+        H,W 由 cfg["fbp"]["recon"]["img_size"] 决定（默认 256×256 或 512×512）
+        经 _apply_post 处理后，通常归一化到 [0,1] 并转换为 float32
+
+    - Physical Spacing:
+        若传入 spacing_dzyx=(dz,dy,dx) 或 cfg.data.spacing.enabled=True，
+        则重建体素的物理范围会基于 (dy,dx) 构造 ASTRA 的长形式 vol_geom。
+
+I/O Behavior:
+    - 若 cfg.fbp.io.save_npz_all=True:
+        存为: {out_root}/{prefix}.npz，键名 "recon" -> [S,H,W]
+        其中 prefix 模板缺省为 "recon_{case_id}_{stop}@{step}"
+
+    - 若 cfg.fbp.io.save_png_each_slice=True:
+        存为: {out_root}/{prefix}/0000.png, 0001.png, ...
+        PNG 默认写入经过 post 的结果（浮点会乘 255 转 uint8）
+
+    - ground_truth_zyx (可选):
+        若传入 [S,H,W] 的 GT，会额外保存到 {out_root}/groudtruth/*.png，
+        仅用于参考可视化，不写入 npz（函数不参与评估）。
+
+Errors & Validations:
+    - angles 长度必须等于 sino.shape[1] (A)
+    - det_pixel_mm 的解析顺序：
+        1) 若是数值，直接用；
+        2) 若为 "auto"：需要 dx；优先 spacing_dzyx，其次 cfg.data.spacing；否则报错；
+        3) 若 det.from_image=True 且未给数值：需要 dx；否则报错。
+    - 几何类型仅支持 "fanflat"/"parallel"
+
+Public API:
+    fbp_reconstruct_with_astra(
+        sino_SAD: np.ndarray,            # [S,A,D]
+        cfg_merged: Dict,                # 已合并的配置（含 default+FBP）
+        case_id: str | int = "case",     # 文件命名前缀中的 {case_id}
+        ground_truth_zyx: np.ndarray | None = None,  # 可选 GT，只保存 PNG
+        spacing_dzyx: Tuple[float,float,float] | None = None  # (dz,dy,dx) mm
+    ) -> np.ndarray                      # 返回 [S,H,W] float32
+
+Typical Usage:
+    from src.configs.configloading import load_config
+    from src.data.data_load import data_load_chest
+    from src.data.data_process.projection import project_volume_with_astra
+    from src.model.FBP import fbp_reconstruct_with_astra
+
+    # 1) 读取 default 并做前向投影（示例）
+    cfg_default = load_config("configs/default/chest.yaml", default_path=None)
+    vol_HU_zyx, spacing_dzyx, meta = data_load_chest.load_data_chest("1", "CT")
+    sino = project_volume_with_astra(vol_HU_zyx, spacing_dzyx, cfg_default, case_id=meta.get("case_id","1"))
+
+    # 2) 读取 FBP 配置（已继承 default）
+    cfg_fbp = load_config("configs/FBP/chest.yaml", default_path=None)
+
+    # 3) FBP 重建（仅动重建端参数）
+    recon_zyx = fbp_reconstruct_with_astra(
+        sino_SAD=sino,                  # [S,A,D]
+        cfg_merged=cfg_fbp,             # merged (default + FBP)
+        case_id=meta.get("case_id", "nocase"),
+        ground_truth_zyx=None,          # 可传入 GT 以保存参考 PNG
+        spacing_dzyx=spacing_dzyx       # 用于 vol_geom 物理范围/推断 dx
+    )
+
+Notes:
+    - 想提升观感、削弱条纹：优先在 cfg.fbp.filter 里换窗（如 "hann"/"shepp-logan"），
+      并适当提高 short_scan.pixel_supersampling（例如 2）。
+    - 若需要严格数值评估（SSIM/PSNR），请使用 src/evaluate/metrics_volume.py，
+      并注意与 GT 的归一化一致性（建议 normalize="per_slice"）。
+"""
+
+
+
 from __future__ import annotations
 import os
 from pathlib import Path
@@ -171,12 +345,14 @@ def _apply_post(recon: np.ndarray, cfg_fbp: Dict) -> np.ndarray:
     mask_circle = bool(post.get("mask_circle", False)) \
                   or bool(_get_from(cfg_fbp, ("projection.astra",), {}).get("pad_to_fov", False))
     if mask_circle:
-        rfac = float(post.get("mask_radius_factor", 0.99))
+        rfac = float(post.get("mask_radius_factor", 1))
         recon = _apply_fov_mask_circle(recon, radius_factor=rfac)
 
     # ② 归一化
     mode = post.get("normalize", "minmax_per_slice")
+
     if mode == "minmax_per_slice":
+        # 逐 slice min-max 到 [0,1]
         S = recon.shape[0]
         for s in range(S):
             v = recon[s]
@@ -199,11 +375,35 @@ def _apply_post(recon: np.ndarray, cfg_fbp: Dict) -> np.ndarray:
             else:
                 recon[s] = 0.0
 
+    elif mode == "minmax":
+        # 全局 min-max 到 [0,1]（跨 slice 一致）
+        gmin = float(np.min(recon))
+        gmax = float(np.max(recon))
+        if gmax > gmin:
+            recon = (recon - gmin) / (gmax - gmin)
+        else:
+            recon = np.zeros_like(recon, dtype=np.float32)
+
+    elif mode == "fixed":
+        # 固定范围到 [0,1]（适合 HU/μ 的物理口径）
+        # cfg: fbp.post.fixed_range: [lo, hi]
+        lo, hi = post.get("fixed_range", [-1000.0, 3000.0])
+        lo, hi = float(lo), float(hi)
+        if hi <= lo:
+            raise ValueError(f"[global_fixed] invalid fixed_range: {lo}, {hi}")
+        recon = np.clip((recon - lo) / (hi - lo), 0.0, 1.0)
+
     elif mode in (None, "none"):
         pass
 
     else:
         raise ValueError(f"Unsupported normalize mode: {mode}")
+
+    # （可选）再次遮罩，确保外圈保持 0
+    if mask_circle:
+        rfac = float(post.get("mask_radius_factor", 1.0))
+        recon = _apply_fov_mask_circle(recon, radius_factor=rfac)
+
 
     # ③ 缩放/裁剪
     scale = float(post.get("scale", 1.0))
@@ -239,38 +439,62 @@ def _to_uint8_slicewise(arr: np.ndarray, mode: str = "percentile",
         out[s] = (u * 255.0 + 0.5).astype(np.uint8)
     return out
 
+def _fmt_num(x: float) -> str:
+    """Format float like 3 -> '3', 3.5 -> '3.5', 3.250 -> '3.25' (max 6 decimals)."""
+    s = f"{x:.6f}".rstrip('0').rstrip('.')
+    return s if s else "0"
 
 def _save_outputs(recon: np.ndarray, cfg_fbp: Dict, case_id: str | int | None,
                   ground_truth_zyx: np.ndarray | None = None):
     """
     保存重建结果；若提供 ground_truth_zyx，则仅保存 PNG 到 groudtruth 目录（不存 npz）。
+    - 前缀支持小数角度
+    - .npz 保存到 fbp.io.save_npz_dir（按 {dataset_name} 模板展开）
+    - dataset_name 来自 data.name
     """
     io_cfg = cfg_fbp["fbp"]["io"]
-    out_root = Path(io_cfg.get("out_root", "outputs/FBP"))
+
+    # ---- dataset_name from data.name ----
+    dataset_name = cfg_fbp.get("data", {}).get("name", "unknown")
+
+    # ---- output roots (expand {dataset_name}) ----
+    out_root_tpl = io_cfg.get("out_root", "outputs/FBP/{dataset_name}")
+    out_root = Path(out_root_tpl.format(dataset_name=dataset_name))
     out_root.mkdir(parents=True, exist_ok=True)
 
-    # 角度信息
+    # 角度信息（保留小数）
     ang_cfg = cfg_fbp["projection"]["angles"]
-    stop_deg = int(ang_cfg.get("stop_deg", 180))
-    step_deg = int(ang_cfg.get("step_deg", 1))
+    stop_deg = float(ang_cfg.get("stop_deg", 180.0))
+    step_deg = float(ang_cfg.get("step_deg", 1.0))
 
     # case_id 兜底
     case_id_safe = str(case_id) if case_id not in (None, "", "None") else "nocase"
 
-    # 前缀（与 .npz 同名，也作为 PNG 文件夹名）
+    # 前缀（与 .npz 同名，也作为 PNG 文件夹名）；角度小数友好显示
     prefix_tpl = io_cfg.get("case_prefix", "recon_{case_id}_{stop}@{step}")
-    prefix = prefix_tpl.format(case_id=case_id_safe, stop=stop_deg, step=step_deg)
+    prefix = prefix_tpl.format(
+        case_id=case_id_safe,
+        stop=_fmt_num(stop_deg),
+        step=_fmt_num(step_deg),
+    )
 
-    # 1) 保存重建整体 npz（如开启）
+    # 1) 保存重建整体 npz（如开启） -> 到 save_npz_dir（按 {dataset_name} 展开）
     if bool(io_cfg.get("save_npz_all", True)):
-        np.savez_compressed(out_root / f"{prefix}.npz", recon=recon)
+        save_npz_dir_tpl = io_cfg.get("save_npz_dir", "data/interim/recon/{dataset_name}")
+        save_npz_dir = Path(save_npz_dir_tpl.format(dataset_name=dataset_name))
+        save_npz_dir.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(save_npz_dir / f"{prefix}.npz", recon=recon)
+
+        print(f"[FBP] Saved reconstruction npz to: {save_npz_dir / f'{prefix}.npz'}")
 
     # 2) 保存重建 PNG
     if bool(io_cfg.get("save_png_each_slice", True)):
         if iio is None:
             print("[FBP] imageio 未安装，跳过 PNG 保存")
         else:
-            png_dir = out_root / prefix
+
+            # 改成 out_root/recon_{caseid}/{prefix}
+            png_dir = out_root / f"recon_{case_id_safe}" / prefix
             png_dir.mkdir(parents=True, exist_ok=True)
 
             arr = recon
@@ -283,15 +507,22 @@ def _save_outputs(recon: np.ndarray, cfg_fbp: Dict, case_id: str | int | None,
             for s in range(arr.shape[0]):
                 iio.imwrite(png_dir / f"{s:04d}.png", arr_to_write[s])
 
+            print(f"[FBP] Saved PNG slices to: {png_dir}")
+
+
     # 3) Ground Truth：只保存 PNG 到 groudtruth 目录 (normalize)
     if ground_truth_zyx is not None and iio is not None:
         gt = np.asarray(ground_truth_zyx, dtype=np.float32)
         if gt.ndim != 3:
             raise ValueError(f"ground_truth_zyx must be [S,H,W], got shape {gt.shape}")
-        gt_dir = out_root / "groudtruth"
+        
+        # case_id 兜底
+        case_id_safe = str(case_id) if case_id not in (None, "", "None") else "nocase"
+
+        # groundtruth 目录改成带 case_id
+        gt_dir = out_root / f"groundtruth_{case_id_safe}"
         gt_dir.mkdir(parents=True, exist_ok=True)
 
-        # slice-wise min–max 归一化到 [0,255]
         S = gt.shape[0]
         for s in range(S):
             v = gt[s]
@@ -303,6 +534,7 @@ def _save_outputs(recon: np.ndarray, cfg_fbp: Dict, case_id: str | int | None,
             v_u8 = (v_norm * 255.0 + 0.5).astype(np.uint8)
             iio.imwrite(gt_dir / f"{s:04d}.png", v_u8)
 
+        print(f"[FBP] Saved ground truth PNG slices to: {gt_dir}")
 
 
 

@@ -1,6 +1,6 @@
 # config.yaml 的片段
 data:
-  name: chest            # chest / other
+  name: "chest"           # chest / other
   dataset_name: "chest"   # 用于保存路径 data/interim/{dataset_name}/...
   axis_order: "zyx"      # chest 固定为 zyx；other 可能是 xyz
   spacing:               # 对于 non-chest（或读不到 spacing）在这里给
@@ -8,57 +8,3 @@ data:
     order: "dzyx"        # 这里的顺序声明（dz, dy, dx）
     values: [2.5, 0.703125, 0.703125]
 
-projection:
-  task: "forward"
-  slice_axis: "z"        # 按 z 切
-  slice_stride: 1
-  output_order: "SxAxD"  # 输出维度顺序：S=Slice, A=Angle(°), D=Detector
-  dtype: "float32"
-
-  # 角度（用 step，而不是 count）
-  angles:
-    mode: "range_step"        # range_step = 用步长
-    start_deg: 0.0
-    stop_deg: 60.0           # 半扫描/有限角随便设；闭区间与否看 include_endpoint
-    step_deg: 3            # 由你控制角度分辨率
-    include_endpoint: true   # 等价于 np.arange(..., endpoint=)
-
-  # 几何（fanflat，标量版）
-  geom:
-    type: "fanflat"
-    # 探测器参数：按“图片本身数据”自动推断（见下面的逻辑）
-    det:
-      from_image: false        # 若 true：det_count = 图像宽度（X），det_pixel_mm = dx
-      det_count: 1000          # 当 from_image=false 时生效
-      det_pixel_mm: 0.7
-    # 距离参数
-    source_origin_mm: 1000.0   # DSO
-    origin_det_mm: 600.0      # ODD
-
-  # 单位/预处理
-  volume:
-    input_units: "auto"       # auto / HU / mu / gray
-    axis_order: "auto"        # auto 则按 data.name 推断（chest=zyx, other=xyz）
-    hu_to_mu:
-      enabled: true
-      mu_water_mm_inv: 0.02
-      hu_clip: [-1000, 3000]
-
-  # ASTRA/执行
-  astra:
-    projector_2d: "cuda"      # cuda / line
-    batch_slices: 16          # 默认 16，按显存可在 YAML 里改
-    pad_to_fov: true         # 消除伪影
-    cosine_weight: true
-    parker_weighting: false
-
-  # 保存
-  save:
-    enabled: true
-    dir: "data/interim/{dataset_name}"
-    filename: "chest_{case_id}_{range}.npy"   # {range} 例如 "180@3"
-    pngs:
-      enabled: false          # 开关：是否导出每角度 PNG
-      height: 1              # PNG 的高度（=1 表示“原始一行投影”；>1 会做竖向重复以便可视）
-      normalize: "minmax"   # "percentile" | "minmax"
-      percentiles: [0.5, 99.5]  # 百分位裁剪（仅在 normalize=percentile 时使用）

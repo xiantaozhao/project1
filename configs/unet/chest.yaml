@@ -1,0 +1,111 @@
+# configs/unet/chest.yaml
+inherit_from: "configs/default/chest.yaml"
+
+project:
+  name: "limited-angle-unet"
+  seed: 2025
+  device: "cuda"
+
+data:
+  dataset_name: "chest"
+
+  # 输入路径：data/interim/<dataset_name>/recon
+  recon_root: "data/interim/recon/${data.dataset_name}"
+  file_glob: "recon_*.npz"
+
+  # 文件名规则：recon_<patientid>_<end>@<step>.npz
+  filename_regex: "^recon_(?P<patient>[^_]+)_(?P<end>\\d+(?:\\.\\d+)?)@(?P<step>\\d+(?:\\.\\d+)?)\\.npz$"
+
+  # 过滤器（任意留空即可忽略）
+  filters:
+    patients_in: []        # 只要这些病人；留空表示不过滤
+    patients_exclude: []           # 排除这些病人
+    stop_deg_in: [90]     # 只取这些 stop 角度的文件
+    step_deg_in: [3]      # 只取这些步长
+    stop_deg_range: {min: 0, max: 180}   # 或者用区间
+    step_deg_range: {min: 0.25, max: 3.0}
+
+  # （可选）按 z 轴限制切片范围/步长
+  z_slice:
+    use: false          # true 时启用
+    start: 0            # 含
+    stop: null          # 不含，null 表示到末尾
+    stride: 1           # 每隔多少张取一张
+
+
+  # 数值归一：统一采用 min-max（与您当前 HU 读取方式一致）
+  norm: "minmax"   # future: "zscore" | "window"
+
+
+  # torch.utils.data.DataLoader 相关参数
+  patch_size: [256, 256]
+  batch_size: 8
+  num_workers: 2
+  pin_memory: true
+  shuffle: true
+
+split:
+  # 划分方式：
+  # - "all_train": 所有病人都作为训练（不推荐正式实验，只用于快速测试）
+  # - "manual":    在这里手动列出 train/val/test 的病人 id（推荐）
+  # - "by_patient_list": 从外部 txt 文件读取（每行一个 id，适合数据量大）
+  # - "lopo":      Leave-One-Patient-Out，代码中可扩展实现
+  # - "kfold":     K-fold cross validation，代码中可扩展实现
+  mode: "manual"
+
+  # 训练集包含的病人 id
+  # 这里 patient 2, 3 用来训练
+  train_patients: [2, 3, 4]
+
+  # 验证集包含的病人 id
+  # 这里 patient 1 单独做验证
+  val_patients: [1]
+
+  # 测试集包含的病人 id
+  # 这里暂时设为空列表，表示不留测试集
+  # 如果以后要测试，比如留 patient 4 做最终评估，就写 [4]
+  test_patients: [5]
+
+
+task:
+  objective: "direct"      # or "residual"
+  fov_mask_ratio: 0.95
+
+model:
+  type: "unet"
+  in_ch: 1
+  out_ch: 1
+  base_ch: 48
+  depth: 4
+  bilinear_upsample: true
+  norm: "none"
+
+optim:
+  name: "AdamW"
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  scheduler: { name: "CosineAnnealingLR", T_max: 100 }
+
+train:
+  max_epochs: 100
+  log_interval: 50
+  val_interval: 1
+
+  # 统一输出到 outputs/unet/<dataset_name>/*
+  ckpt_dir:   "outputs/unet/${data.dataset_name}/checkpoints"
+  sample_dir: "outputs/unet/${data.dataset_name}/samples"
+
+  # 日志配置
+  logging:
+    use_tensorboard: true
+    tensorboard_dir: "outputs/unet/${data.dataset_name}/logs/tb"
+    save_csv: true
+    csv_path: "outputs/unet/${data.dataset_name}/logs/train_log.csv"
+    save_every_n_steps: 0   # 0 表示仅按 epoch 记录
+    log_grad_norm: false
+
+infer:
+  ckpt_path: "outputs/unet/${data.dataset_name}/checkpoints/best.pth"
+  save_dir:  "outputs/unet/${data.dataset_name}/infer"
+  save_png: true
+  save_npz: true

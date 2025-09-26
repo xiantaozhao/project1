@@ -65,6 +65,7 @@ class UNetBasic(nn.Module):
         base_channels: int = 64,
         channel_mults: Tuple[int, ...] = (1, 2, 4, 8),
         dropout: float = 0.0,
+        
     ) -> None:
         super().__init__()
 

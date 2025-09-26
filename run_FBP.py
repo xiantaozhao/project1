@@ -12,6 +12,11 @@ sino = project_volume_with_astra(vol_HU_zyx, spacing_dzyx, cfg, case_id=meta.get
 
 cfg_FBP = load_config("configs/FBP/chest.yaml", default_path=None)
 
+cfg = cfg_FBP
+
+gt=vol_HU_zyx
+
+
 recon = fbp_reconstruct_with_astra(
     sino_SAD=sino,            # [S, A, D]
     cfg_merged=cfg_FBP,       # 合并后的配置（包含几何/角度）
@@ -26,7 +31,8 @@ res = evaluate_ssim_psnr(
     rec=recon,              # [S,H,W]
     cfg=cfg_FBP,
     case_id=meta.get('case_id', '1'),
-    save_dir="outputs/FBP"
+    save_dir="outputs/FBP",
+    center_circle_ratio=1
 )
 
 print("SSIM(mean):", res["ssim"]["mean"])
