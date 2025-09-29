@@ -12,7 +12,9 @@ pyyaml==6.0.2
 scikit-image==0.25.2
 simpleitk==2.5.2
 six==1.17.0
+tensorboard==2.20.0
 tomli==2.0.1
 torchaudio==2.1.0
 torchvision==0.16.0
+tqdm==4.67.1
 triton==2.1.0

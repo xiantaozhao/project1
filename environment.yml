@@ -10,4 +10,5 @@ dependencies:
   - astra-toolbox
   - conda-forge::imageio
   - anaconda::scikit-image
+  - conda-forge::tensorboard
 prefix: /home/z/zhaox/.conda/envs/proj
