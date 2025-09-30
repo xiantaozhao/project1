@@ -1,0 +1,25 @@
+# 修复后的DDPM配置 - 解决噪声预测问题
+# 主要修改: 降低学习率、增加训练轮数、改进采样
+
+
+# 修复后的DDPM配置
+training:
+  max_epochs: 300                      # 大幅增加训练轮数
+  batch_size: 8                        # 保持当前batch size
+  save_interval: 20                    # 更频繁保存检查点
+  
+optimizer:
+  name: adamw
+  lr: 7.5e-5                          # 降低学习率 (原来1.5e-4的一半)
+  betas: [0.9, 0.999]
+  weight_decay: 1.0e-4
+  
+diffusion:
+  steps: 1000
+  sample_steps: 200                    # 增加采样步数
+  eta: 0.2                            # 增加随机性
+  
+# 添加学习率调度
+scheduler:
+  name: cosine
+  warmup_steps: 2000                   # 更长的预热

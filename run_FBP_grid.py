@@ -16,8 +16,8 @@ CFG_FBP_PATH     = "configs/FBP/chest.yaml"
 CASE_ID          = "1"
 MODALITY         = "CT"
 
-STOP_LIST = [60.0, 90.0, 120.0, 180.0]
-STEP_LIST = [0.25, 1.0, 3.0]
+STOP_LIST = [180.0]
+STEP_LIST = [3.0, 3.5, 4.0]
 # =========================
 
 def _set_angles(cfg: dict, *, stop_deg: float, step_deg: float):
