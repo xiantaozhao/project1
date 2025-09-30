@@ -4,6 +4,8 @@ import itertools
 import copy
 from pathlib import Path
 
+import numpy as np
+
 from src.configs.configloading import load_config
 from src.data.data_load import data_load_chest
 from src.data.data_process.projection import project_volume_with_astra
@@ -16,9 +18,33 @@ CFG_FBP_PATH     = "configs/FBP/chest.yaml"
 CASE_ID          = "1"
 MODALITY         = "CT"
 
+STOP_LIST = [60, 90, 120, 180.0]
 STOP_LIST = [180.0]
-STEP_LIST = [3.0, 3.5, 4.0]
+STEP_LIST = [0.25, 1.0, 1.5, 2.0, 2.5, 3.0, 5.0, 10.0]
+STEP_LIST = [0.25]
+USE_RECON_GT = True  # False 时直接使用 loader 输出的原始 HU 体作为评估基准
+GT_RECON_ROOT = Path("data/interim/recon/chest")
+GT_RECON_STOP_DEG = 360.0
+GT_RECON_STEP_DEG = 0.25
 # =========================
+
+
+def _format_number(value: float) -> str:
+    try:
+        val = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    rounded = round(val)
+    if abs(val - rounded) < 1e-6:
+        return str(int(rounded))
+    text = f"{val}"
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _make_recon_path(case_id: str, stop_deg: float, step_deg: float) -> Path:
+    stop_str = _format_number(stop_deg)
+    step_str = _format_number(step_deg)
+    return GT_RECON_ROOT / f"recon_{case_id}_{stop_str}@{step_str}.npy"
 
 def _set_angles(cfg: dict, *, stop_deg: float, step_deg: float):
     """
@@ -47,6 +73,13 @@ def _get_current_angles(cfg: dict):
 def main():
     # Load data once to avoid repeated I/O
     vol_HU_zyx, spacing_dzyx, meta = data_load_chest.load_data_chest(CASE_ID, MODALITY)
+    if USE_RECON_GT:
+        gt_eval_path = _make_recon_path(CASE_ID, GT_RECON_STOP_DEG, GT_RECON_STEP_DEG)
+        if not gt_eval_path.exists():
+            raise FileNotFoundError(f"Ground truth file not found: {gt_eval_path}")
+        gt_eval = np.load(gt_eval_path).astype(np.float32)
+    else:
+        gt_eval = vol_HU_zyx.astype(np.float32, copy=False)
     case_id = CASE_ID
 
     # Preload base cfgs so we can deep-copy per run
@@ -102,7 +135,7 @@ def main():
 
 
         res = evaluate_ssim_psnr(
-            gt=vol_HU_zyx,          # [S,H,W]
+            gt=gt_eval,             # [S,H,W]
             rec=recon,              # [S,H,W]
             cfg=cfg_fbp,
             case_id=case_id,

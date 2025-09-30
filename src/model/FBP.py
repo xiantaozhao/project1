@@ -1,174 +1,26 @@
 # -*- coding: utf-8 -*-
-"""
-File: src/model/FBP.py
-Author: <Ming>
-Purpose:
-    使用 ASTRA Toolbox 完成 2D FBP 重建（逐 z-slice），并对 3D 体 [S,H,W] 进行
-    可选的圆形 FOV 遮罩、归一化与落盘。仅修改“重建端 [reconstruction side]”参数；
-    前向投影的几何/角度从已合并的配置里读取（继承自 configs/default/...）。
+"""使用 ASTRA Toolbox 对正弦图执行逐 slice 的 FBP 重建。
 
-Input:
-    sino_SAD : np.ndarray
-        Shape [S, A, D]
-        - S: slice 数 (沿 z 轴逐 slice 重建)
-        - A: angle 数 (必须与 cfg.projection.angles 生成的一致)
-        - D: 探测器通道数 (detector bins)
+功能概览：
+    * 读取 `cfg.projection.*` 构造角度与投影几何。
+    * 复用 ASTRA 投影器逐 slice 调用 FBP / FBP_CUDA。
+    * 根据 `cfg.fbp.post` 执行遮罩、归一化、裁剪与 dtype 转换。
+    * 可选落盘重建体与参考真值 PNG。
 
-    cfg_merged : Dict
-        已合并的配置字典 (default.yaml + FBP.yaml)
-        - 提供角度范围、几何参数、滤波器、重建大小、后处理、IO 路径等
+参数:
+    sino_SAD (np.ndarray): 形状 [S, A, D] 的正弦图数据。
+    cfg_merged (Dict): `default` 与 `FBP` 配置合并后的字典。
+    case_id (str | int): 输出文件名前缀，默认 "case"。
+    ground_truth_zyx (np.ndarray | None): 形状 [S, H, W] 的参考体数据，仅用于保存 PNG。
+    spacing_dzyx (Tuple[float, float, float] | None): (dz, dy, dx) 的体素间距，单位 mm。
 
-    case_id : str | int, default="case"
-        文件名前缀里的 {case_id}
+返回:
+    np.ndarray: 形状 [S, H, W]、dtype=float32 的重建体数据。
 
-    ground_truth_zyx : np.ndarray | None, default=None
-        可选的参考体数据，Shape [S, H, W]
-        - 若提供，则保存为 PNG 到 groudtruth/ 目录
-        - 不参与重建和数值计算
-
-    spacing_dzyx : tuple(float,float,float) | None
-        (dz, dy, dx) in mm
-        - 若提供，用于构建 ASTRA vol_geom 的物理尺寸
-        - 否则尝试从 cfg.data.spacing 中读取
-
-Output:
-    recon : np.ndarray
-        Shape [S, H, W], dtype=float32
-        - 每 slice 重建图像
-        - 已根据 cfg.fbp.post 进行归一化/裁剪/dtype 转换
-        - 默认范围 [0,1]
-
-
-Key Dependencies:
-    - astra (GPU: 'FBP_CUDA' + 'cuda' projector; CPU: 'FBP' + 'line' projector)
-    - numpy
-    - imageio (可选，仅用于保存 PNG)
-    - 项目内的 load_config: 需返回已做 inherit 的 cfg（含 default+FBP）
-
-Expected Config Schema (摘录):
-    cfg["projection"]["angles"]:
-        mode: "range_step"
-        start_deg: float
-        stop_deg : float
-        step_deg : float
-        include_endpoint: bool
-    cfg["projection"]["geom"]:
-        type: "fanflat" | "parallel"
-        det:
-            from_image: bool
-            det_pixel_mm: float | "auto"
-        source_origin_mm: float  # DSO
-        origin_det_mm  : float  # ODD
-    cfg["data"]["spacing"]:
-        enabled: bool
-        order  : "dzyx"  # (dz,dy,dx)
-        values : [dz,dy,dx]  # mm
-    cfg["fbp"]:
-        algo      : "FBP_CUDA" | "FBP"
-        projector : "cuda" | "line"
-        recon:
-            img_size: [H, W]
-            crop_to_circle: bool (未在算法内裁切，仅 post 可遮罩)
-        filter:
-            type: "ram-lak" | "hann" | "hamming" | "shepp-logan" | ...
-            d_param    : Optional[float]
-            parameter  : Optional[float]
-            cutoff     : Optional[float] (not always used by ASTRA)
-        short_scan:
-            enabled: bool       # Parker weighting
-            pixel_supersampling: int  # 'PixelSuperSampling'
-        post:
-            # 归一化 [normalization]：三选一
-            # - "minmax_per_slice": 每 slice min-max 到 [0,1]
-            # - "percentile"     : 每 slice 用百分位 [p_lo,p_hi] 归一化到 [0,1]
-            # - "none"/None      : 不做归一化
-            normalize: "minmax_per_slice" | "percentile" | "none"
-            percentiles: [p_lo, p_hi]  # 当 normalize="percentile" 时有效
-            mask_circle: bool          # 是否应用圆形 FOV 遮罩（外圈置零）
-            mask_radius_factor: float  # 遮罩半径 = 0.5*min(H,W)*factor
-            scale: float               # 归一化后的整体缩放
-            clip : [lo, hi] | null     # 归一化/缩放后的裁剪范围
-            dtype: "float32" | ...
-        io:
-            out_root: "outputs/FBP"
-            save_npz_all: bool
-            save_png_each_slice: bool
-            case_prefix: "recon_{case_id}_{stop}@{step}"
-
-Shapes & Conventions:
-    - Sinogram [sino_SAD]: [S, A, D]
-        S: slice 数（沿 cfg["projection"]["slice_axis"]="z" 切）
-        A: angle 数（必须与 cfg 中生成的 angles 长度一致）
-        D: detector 通道数（本文件以输入 sino 的 D 为准）
-        单 slice 期望为 [A, D]（若收到 [D, A] 会自动转置）
-        数值应为线积分 [line integral], i.e., -log(I/I0)
-
-    - Reconstruction [recon]: [S, H, W]
-        H,W 由 cfg["fbp"]["recon"]["img_size"] 决定（默认 256×256 或 512×512）
-        经 _apply_post 处理后，通常归一化到 [0,1] 并转换为 float32
-
-    - Physical Spacing:
-        若传入 spacing_dzyx=(dz,dy,dx) 或 cfg.data.spacing.enabled=True，
-        则重建体素的物理范围会基于 (dy,dx) 构造 ASTRA 的长形式 vol_geom。
-
-I/O Behavior:
-    - 若 cfg.fbp.io.save_npz_all=True:
-        存为: {out_root}/{prefix}.npz，键名 "recon" -> [S,H,W]
-        其中 prefix 模板缺省为 "recon_{case_id}_{stop}@{step}"
-
-    - 若 cfg.fbp.io.save_png_each_slice=True:
-        存为: {out_root}/{prefix}/0000.png, 0001.png, ...
-        PNG 默认写入经过 post 的结果（浮点会乘 255 转 uint8）
-
-    - ground_truth_zyx (可选):
-        若传入 [S,H,W] 的 GT，会额外保存到 {out_root}/groudtruth/*.png，
-        仅用于参考可视化，不写入 npz（函数不参与评估）。
-
-Errors & Validations:
-    - angles 长度必须等于 sino.shape[1] (A)
-    - det_pixel_mm 的解析顺序：
-        1) 若是数值，直接用；
-        2) 若为 "auto"：需要 dx；优先 spacing_dzyx，其次 cfg.data.spacing；否则报错；
-        3) 若 det.from_image=True 且未给数值：需要 dx；否则报错。
-    - 几何类型仅支持 "fanflat"/"parallel"
-
-Public API:
-    fbp_reconstruct_with_astra(
-        sino_SAD: np.ndarray,            # [S,A,D]
-        cfg_merged: Dict,                # 已合并的配置（含 default+FBP）
-        case_id: str | int = "case",     # 文件命名前缀中的 {case_id}
-        ground_truth_zyx: np.ndarray | None = None,  # 可选 GT，只保存 PNG
-        spacing_dzyx: Tuple[float,float,float] | None = None  # (dz,dy,dx) mm
-    ) -> np.ndarray                      # 返回 [S,H,W] float32
-
-Typical Usage:
-    from src.configs.configloading import load_config
-    from src.data.data_load import data_load_chest
-    from src.data.data_process.projection import project_volume_with_astra
-    from src.model.FBP import fbp_reconstruct_with_astra
-
-    # 1) 读取 default 并做前向投影（示例）
-    cfg_default = load_config("configs/default/chest.yaml", default_path=None)
-    vol_HU_zyx, spacing_dzyx, meta = data_load_chest.load_data_chest("1", "CT")
-    sino = project_volume_with_astra(vol_HU_zyx, spacing_dzyx, cfg_default, case_id=meta.get("case_id","1"))
-
-    # 2) 读取 FBP 配置（已继承 default）
-    cfg_fbp = load_config("configs/FBP/chest.yaml", default_path=None)
-
-    # 3) FBP 重建（仅动重建端参数）
-    recon_zyx = fbp_reconstruct_with_astra(
-        sino_SAD=sino,                  # [S,A,D]
-        cfg_merged=cfg_fbp,             # merged (default + FBP)
-        case_id=meta.get("case_id", "nocase"),
-        ground_truth_zyx=None,          # 可传入 GT 以保存参考 PNG
-        spacing_dzyx=spacing_dzyx       # 用于 vol_geom 物理范围/推断 dx
-    )
-
-Notes:
-    - 想提升观感、削弱条纹：优先在 cfg.fbp.filter 里换窗（如 "hann"/"shepp-logan"），
-      并适当提高 short_scan.pixel_supersampling（例如 2）。
-    - 若需要严格数值评估（SSIM/PSNR），请使用 src/evaluate/metrics_volume.py，
-      并注意与 GT 的归一化一致性（建议 normalize="per_slice"）。
+注意事项:
+    * angles 数量必须与 `sino_SAD` 的第二维一致。
+    * 仅支持 fanflat 或 parallel 投影几何。
+    * 若 `det_pixel_mm` 为 "auto" 或依赖图像尺寸，需要能够解析体素 dx。
 """
 
 
@@ -176,7 +28,7 @@ Notes:
 from __future__ import annotations
 import os
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, Optional, Tuple, cast
 import numpy as np
 import astra
 
@@ -261,7 +113,7 @@ def _proj_geom_from_default(cfg: Dict, angles: np.ndarray, sino_D: int,
     DSO = float(g.get("source_origin_mm", 600.0))
     ODD = float(g.get("origin_det_mm",  400.0))
 
-    # ---- 准备 dx 值（优先用函数入参 spacing_dzyx）----
+    # 优先从入参或数据配置解析体素 dx
     dx_val = None
     if spacing_dzyx is not None and len(spacing_dzyx) == 3:
         dx_val = float(spacing_dzyx[2])
@@ -272,7 +124,7 @@ def _proj_geom_from_default(cfg: Dict, angles: np.ndarray, sino_D: int,
             if isinstance(vals, (list, tuple)) and len(vals) == 3:
                 dx_val = float(vals[2])  # dx
 
-    # ---- 解析 det_pixel_mm ----
+    # 解析探测器像素尺寸 det_pixel_mm
     det_pixel_mm = det_cfg.get("det_pixel_mm", None)
     if isinstance(det_pixel_mm, str) and det_pixel_mm.lower() == "auto":
         if dx_val is None:
@@ -291,7 +143,7 @@ def _proj_geom_from_default(cfg: Dict, angles: np.ndarray, sino_D: int,
 
     det_spacing = float(det_pixel_mm)
 
-    # ---- 构建 ASTRA 几何 ----
+    # 构建 ASTRA 投影几何
     if gtype == "parallel":
         return astra.create_proj_geom('parallel', det_spacing, det_count, angles)
     elif gtype in ("fanflat", "fanbeam", "fan"):
@@ -338,88 +190,6 @@ def _apply_fov_mask_circle(arr_3d: np.ndarray, radius_factor: float = 0.99) -> n
     return arr_3d * mask[None, ...]
 
 
-def _apply_post(recon: np.ndarray, cfg_fbp: Dict) -> np.ndarray:
-    """按照配置做遮罩/归一化/裁剪/dtype。"""
-    post = _get_from(cfg_fbp, ("fbp.post",))
-    # ① 兼容两处开关：fbp.post.mask_circle 或 projection.astra.pad_to_fov
-    mask_circle = bool(post.get("mask_circle", False)) \
-                  or bool(_get_from(cfg_fbp, ("projection.astra",), {}).get("pad_to_fov", False))
-    if mask_circle:
-        rfac = float(post.get("mask_radius_factor", 1))
-        recon = _apply_fov_mask_circle(recon, radius_factor=rfac)
-
-    # ② 归一化
-    mode = post.get("normalize", "minmax_per_slice")
-
-    if mode == "minmax_per_slice":
-        # 逐 slice min-max 到 [0,1]
-        S = recon.shape[0]
-        for s in range(S):
-            v = recon[s]
-            vmin, vmax = float(np.min(v)), float(np.max(v))
-            if vmax > vmin:
-                recon[s] = (v - vmin) / (vmax - vmin)
-            else:
-                recon[s] = 0.0
-
-    elif mode == "percentile":
-        # 逐 slice 百分位归一化到 [0,1]
-        p_lo, p_hi = post.get("percentiles", [1.0, 99.0])
-        S = recon.shape[0]
-        for s in range(S):
-            v = recon[s]
-            lo = np.percentile(v, p_lo)
-            hi = np.percentile(v, p_hi)
-            if hi > lo:
-                recon[s] = np.clip((v - lo) / (hi - lo), 0, 1)
-            else:
-                recon[s] = 0.0
-
-    elif mode == "minmax":
-        # 全局 min-max 到 [0,1]（跨 slice 一致）
-        gmin = float(np.min(recon))
-        gmax = float(np.max(recon))
-        if gmax > gmin:
-            recon = (recon - gmin) / (gmax - gmin)
-        else:
-            recon = np.zeros_like(recon, dtype=np.float32)
-
-    elif mode == "fixed":
-        # 固定范围到 [0,1]（适合 HU/μ 的物理口径）
-        # cfg: fbp.post.fixed_range: [lo, hi]
-        lo, hi = post.get("fixed_range", [-1000.0, 3000.0])
-        lo, hi = float(lo), float(hi)
-        if hi <= lo:
-            raise ValueError(f"[global_fixed] invalid fixed_range: {lo}, {hi}")
-        recon = np.clip((recon - lo) / (hi - lo), 0.0, 1.0)
-
-    elif mode in (None, "none"):
-        pass
-
-    else:
-        raise ValueError(f"Unsupported normalize mode: {mode}")
-
-    # （可选）再次遮罩，确保外圈保持 0
-    if mask_circle:
-        rfac = float(post.get("mask_radius_factor", 1.0))
-        recon = _apply_fov_mask_circle(recon, radius_factor=rfac)
-
-
-    # ③ 缩放/裁剪
-    scale = float(post.get("scale", 1.0))
-    if scale != 1.0:
-        recon = recon * scale
-
-    clip = post.get("clip", None)
-    if clip is not None:
-        lo, hi = float(clip[0]), float(clip[1])
-        recon = np.clip(recon, lo, hi)
-
-    # ④ dtype
-    dtype = post.get("dtype", "float32")
-    return recon.astype(dtype, copy=False)
-
-
 def _to_uint8_slicewise(arr: np.ndarray, mode: str = "percentile",
                         p_lo: float = 0.5, p_hi: float = 99.5) -> np.ndarray:
     """
@@ -439,103 +209,327 @@ def _to_uint8_slicewise(arr: np.ndarray, mode: str = "percentile",
         out[s] = (u * 255.0 + 0.5).astype(np.uint8)
     return out
 
+
 def _fmt_num(x: float) -> str:
     """Format float like 3 -> '3', 3.5 -> '3.5', 3.250 -> '3.25' (max 6 decimals)."""
     s = f"{x:.6f}".rstrip('0').rstrip('.')
     return s if s else "0"
 
-def _save_outputs(recon: np.ndarray, cfg_fbp: Dict, case_id: str | int | None,
-                  ground_truth_zyx: np.ndarray | None = None):
-    """
-    保存重建结果；若提供 ground_truth_zyx，则仅保存 PNG 到 groudtruth 目录（不存 npz）。
-    - 前缀支持小数角度
-    - .npz 保存到 fbp.io.save_npz_dir（按 {dataset_name} 模板展开）
-    - dataset_name 来自 data.name
-    """
-    io_cfg = cfg_fbp["fbp"]["io"]
+class _FBPReconstructionPipeline:
+    """封装 FBP 重建全流程，避免重复提取配置。"""
 
-    # ---- dataset_name from data.name ----
-    dataset_name = cfg_fbp.get("data", {}).get("name", "unknown")
-
-    # ---- output roots (expand {dataset_name}) ----
-    out_root_tpl = io_cfg.get("out_root", "outputs/FBP/{dataset_name}")
-    out_root = Path(out_root_tpl.format(dataset_name=dataset_name))
-    out_root.mkdir(parents=True, exist_ok=True)
-
-    # 角度信息（保留小数）
-    ang_cfg = cfg_fbp["projection"]["angles"]
-    stop_deg = float(ang_cfg.get("stop_deg", 180.0))
-    step_deg = float(ang_cfg.get("step_deg", 1.0))
-
-    # case_id 兜底
-    case_id_safe = str(case_id) if case_id not in (None, "", "None") else "nocase"
-
-    # 前缀（与 .npz 同名，也作为 PNG 文件夹名）；角度小数友好显示
-    prefix_tpl = io_cfg.get("case_prefix", "recon_{case_id}_{stop}@{step}")
-    prefix = prefix_tpl.format(
-        case_id=case_id_safe,
-        stop=_fmt_num(stop_deg),
-        step=_fmt_num(step_deg),
-    )
-
-    # 1) 保存重建整体 npz（如开启） -> 到 save_npz_dir（按 {dataset_name} 展开）
-    if bool(io_cfg.get("save_npz_all", True)):
-        save_npz_dir_tpl = io_cfg.get("save_npz_dir", "data/interim/recon/{dataset_name}")
-        save_npz_dir = Path(save_npz_dir_tpl.format(dataset_name=dataset_name))
-        save_npz_dir.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(save_npz_dir / f"{prefix}.npz", recon=recon)
-
-        print(f"[FBP] Saved reconstruction npz to: {save_npz_dir / f'{prefix}.npz'}")
-
-    # 2) 保存重建 PNG
-    if bool(io_cfg.get("save_png_each_slice", True)):
-        if iio is None:
-            print("[FBP] imageio 未安装，跳过 PNG 保存")
+    def __init__(self, cfg: Dict, spacing_dzyx: Optional[Tuple[float, float, float]]):
+        self.cfg = cfg
+        if spacing_dzyx is not None:
+            if len(spacing_dzyx) != 3:
+                raise ValueError("spacing_dzyx must be (dz,dy,dx)")
+            self.spacing_dzyx: Optional[Tuple[float, float, float]] = (
+                float(spacing_dzyx[0]),
+                float(spacing_dzyx[1]),
+                float(spacing_dzyx[2]),
+            )
         else:
+            self.spacing_dzyx = None
 
-            # 改成 out_root/recon_{caseid}/{prefix}
-            png_dir = out_root / f"recon_{case_id_safe}" / prefix
-            png_dir.mkdir(parents=True, exist_ok=True)
+        self.post_cfg = _get_from(cfg, ("fbp.post",))
+        self.filter_cfg = _get_from(cfg, ("fbp.filter",))
+        self.short_scan_cfg = _get_from(cfg, ("fbp.short_scan",))
+        self.proj_astra_cfg = _get_from(cfg, ("projection.astra",), default={})
+        self.proj_volume_cfg = _get_from(cfg, ("projection.volume",), default={})
+        self.io_cfg = cfg["fbp"]["io"]
+        self.dataset_name = cfg.get("data", {}).get("name", "unknown")
 
-            arr = recon
-            # 假定 recon 已归一化到 [0,1]；若不是浮点则直接写
-            if arr.dtype.kind in "fc":
-                arr_to_write = (np.clip(arr, 0, 1) * 255.0).astype(np.uint8)
+        self.algo: Optional[str] = None
+        self.projector: Optional[str] = None
+        self.angles: Optional[np.ndarray] = None
+        self.proj_geom = None
+        self.vol_geom = None
+        self.S = self.A = self.D = 0
+
+        self.mask_circle_enabled = bool(self.post_cfg.get("mask_circle", False)) or bool(
+            self.proj_astra_cfg.get("pad_to_fov", False)
+        )
+        self.mask_radius_factor = float(self.post_cfg.get("mask_radius_factor", 1.0))
+        self.normalization_mode = self.post_cfg.get("normalize", "minmax_per_slice")
+        percentiles = self.post_cfg.get("percentiles", [1.0, 99.0])
+        self.percentiles = (float(percentiles[0]), float(percentiles[1])) if len(percentiles) >= 2 else (1.0, 99.0)
+        fixed_range = self.post_cfg.get("fixed_range", [-1000.0, 3000.0])
+        self.fixed_range = (float(fixed_range[0]), float(fixed_range[1])) if len(fixed_range) >= 2 else (-1000.0, 3000.0)
+        self.scale_factor = float(self.post_cfg.get("scale", 1.0))
+        self.clip_range = self.post_cfg.get("clip", None)
+        self.target_dtype = self.post_cfg.get("dtype", "float32")
+
+        self.parker_from_proj = bool(self.proj_astra_cfg.get("parker_weighting", False))
+        self.pixel_ss = int(self.short_scan_cfg.get("pixel_supersampling", 1))
+        self.short_scan_enabled = bool(self.short_scan_cfg.get("enabled", False)) or self.parker_from_proj
+
+        hu_to_mu_cfg = self.proj_volume_cfg.get("hu_to_mu", {}) if isinstance(self.proj_volume_cfg, dict) else {}
+        self.gt_hu_to_mu_enabled = bool(hu_to_mu_cfg.get("enabled", False))
+        clip_vals = hu_to_mu_cfg.get("hu_clip", [-1024.0, 3071.0])
+        if isinstance(clip_vals, (list, tuple)) and len(clip_vals) >= 2:
+            self.gt_hu_clip = (float(clip_vals[0]), float(clip_vals[1]))
+        else:
+            self.gt_hu_clip = (-1024.0, 3071.0)
+        self.gt_mu_water = float(hu_to_mu_cfg.get("mu_water_mm_inv", 0.02))
+
+    def run(
+        self,
+        sino_SAD: np.ndarray,
+        *,
+        case_id: str | int = "case",
+        ground_truth: np.ndarray | None = None,
+    ) -> np.ndarray:
+        assert sino_SAD.ndim == 3, "sino must be [S, A, D]"
+        self._prepare_geometry(sino_SAD)
+
+        projector_id = astra.create_projector(self.projector, self.proj_geom, self.vol_geom)
+        try:
+            recon = self._reconstruct_volume(sino_SAD, projector_id)
+        finally:
+            astra.projector.delete(projector_id)
+
+        recon = self._apply_post(recon)
+        self._save_outputs(recon, case_id, ground_truth)
+        return recon
+
+    def _prepare_geometry(self, sino_SAD: np.ndarray) -> None:
+        self.S, self.A, self.D = sino_SAD.shape
+        self.angles = _angles_from_default(self.cfg)
+        if self.angles.shape[0] != self.A:
+            raise ValueError(f"[angles] length {self.angles.shape[0]} != sino A {self.A}")
+
+        self.proj_geom = _proj_geom_from_default(
+            self.cfg,
+            self.angles,
+            sino_D=self.D,
+            spacing_dzyx=self.spacing_dzyx,
+        )
+
+        dy_mm, dx_mm = self._resolve_voxel_spacing()
+        self.vol_geom = _vol_geom_from_fbp(self.cfg, dy_mm=dy_mm, dx_mm=dx_mm)
+        self.algo, self.projector = _algo_and_projector(self.cfg)
+
+    def _resolve_voxel_spacing(self) -> Tuple[Optional[float], Optional[float]]:
+        if self.spacing_dzyx is not None:
+            return float(self.spacing_dzyx[1]), float(self.spacing_dzyx[2])
+
+        data_sp = self.cfg.get("data", {}).get("spacing", {})
+        if bool(data_sp.get("enabled", False)) and str(data_sp.get("order", "")).lower() == "dzyx":
+            vals = data_sp.get("values", None)
+            if isinstance(vals, (list, tuple)) and len(vals) == 3:
+                return float(vals[1]), float(vals[2])
+        return None, None
+
+    def _reconstruct_volume(self, sino_SAD: np.ndarray, projector_id: int) -> np.ndarray:
+        vol_geom = self.vol_geom
+        if vol_geom is None:
+            raise RuntimeError("Volume geometry has not been prepared.")
+
+        H = cast(int, vol_geom["GridRowCount"])
+        W = cast(int, vol_geom["GridColCount"])
+        recon = np.zeros((self.S, H, W), dtype=np.float32)
+
+        for idx in range(self.S):
+            recon[idx] = self._run_slice(sino_SAD[idx], projector_id)
+
+        return recon
+
+    def _run_slice(self, sino_slice: np.ndarray, projector_id: int) -> np.ndarray:
+        sino_AD = np.asarray(sino_slice, dtype=np.float32)
+        if sino_AD.shape != (self.A, self.D):
+            if sino_AD.shape == (self.D, self.A):
+                sino_AD = sino_AD.T
             else:
-                arr_to_write = arr
+                raise ValueError(f"Unexpected slice sino shape: {sino_AD.shape}, expect {(self.A, self.D)}")
 
-            for s in range(arr.shape[0]):
-                iio.imwrite(png_dir / f"{s:04d}.png", arr_to_write[s])
+        proj_geom = self.proj_geom
+        vol_geom = self.vol_geom
+        algo = self.algo
+        if proj_geom is None or vol_geom is None or algo is None:
+            raise RuntimeError("Geometry or algorithm is not prepared before reconstruction.")
 
-            print(f"[FBP] Saved PNG slices to: {png_dir}")
+        sinogram_id = astra.data2d.create('-sino', proj_geom, sino_AD)
+        recon_id = astra.data2d.create('-vol', vol_geom)
 
+        cfg: Dict[str, Any] = astra.astra_dict(algo)
+        cfg["ProjectionDataId"] = sinogram_id
+        cfg["ReconstructionDataId"] = recon_id
+        cfg["ProjectorId"] = projector_id
 
-    # 3) Ground Truth：只保存 PNG 到 groudtruth 目录 (normalize)
-    if ground_truth_zyx is not None and iio is not None:
-        gt = np.asarray(ground_truth_zyx, dtype=np.float32)
-        if gt.ndim != 3:
-            raise ValueError(f"ground_truth_zyx must be [S,H,W], got shape {gt.shape}")
-        
-        # case_id 兜底
+        options: Dict[str, Any] = {}
+        self._configure_filter(options)
+        self._configure_short_scan(options)
+        if options:
+            cfg["option"] = options
+
+        alg_id = astra.algorithm.create(cfg)
+        try:
+            astra.algorithm.run(alg_id)
+            result = astra.data2d.get(recon_id).astype(np.float32, copy=False)
+        finally:
+            astra.algorithm.delete(alg_id)
+            astra.data2d.delete(sinogram_id)
+            astra.data2d.delete(recon_id)
+
+        return result
+
+    def _configure_filter(self, options: Dict[str, Any]) -> None:
+        if self.filter_cfg.get("type"):
+            options["FilterType"] = self.filter_cfg["type"]
+            if self.filter_cfg.get("d_param") is not None:
+                options["FilterD"] = float(self.filter_cfg["d_param"])
+            if self.filter_cfg.get("parameter") is not None:
+                options["FilterParameter"] = float(self.filter_cfg["parameter"])
+
+    def _configure_short_scan(self, options: Dict[str, Any]) -> None:
+        if self.short_scan_enabled:
+            options["ShortScan"] = True
+        if self.pixel_ss > 1:
+            options["PixelSuperSampling"] = self.pixel_ss
+
+    def _apply_post(self, recon: np.ndarray) -> np.ndarray:
+        if self.mask_circle_enabled:
+            recon = _apply_fov_mask_circle(recon, radius_factor=self.mask_radius_factor)
+
+        mode = self.normalization_mode
+
+        if mode == "minmax_per_slice":
+            for s in range(recon.shape[0]):
+                v = recon[s]
+                vmin, vmax = float(np.min(v)), float(np.max(v))
+                if vmax > vmin:
+                    recon[s] = (v - vmin) / (vmax - vmin)
+                else:
+                    recon[s] = 0.0
+
+        elif mode == "percentile":
+            p_lo, p_hi = self.percentiles
+            for s in range(recon.shape[0]):
+                v = recon[s]
+                lo = np.percentile(v, p_lo)
+                hi = np.percentile(v, p_hi)
+                if hi > lo:
+                    recon[s] = np.clip((v - lo) / (hi - lo), 0.0, 1.0)
+                else:
+                    recon[s] = 0.0
+
+        elif mode == "minmax":
+            gmin = float(np.min(recon))
+            gmax = float(np.max(recon))
+            if gmax > gmin:
+                recon = (recon - gmin) / (gmax - gmin)
+            else:
+                recon = np.zeros_like(recon, dtype=np.float32)
+
+        elif mode == "fixed":
+            lo, hi = self.fixed_range
+            if hi <= lo:
+                raise ValueError(f"[global_fixed] invalid fixed_range: {lo}, {hi}")
+            recon = np.clip((recon - lo) / (hi - lo), 0.0, 1.0)
+
+        elif mode in (None, "none"):
+            pass
+
+        else:
+            raise ValueError(f"Unsupported normalize mode: {mode}")
+
+        if self.mask_circle_enabled:
+            recon = _apply_fov_mask_circle(recon, radius_factor=self.mask_radius_factor)
+
+        if self.scale_factor != 1.0:
+            recon = recon * self.scale_factor
+
+        if self.clip_range is not None:
+            lo, hi = float(self.clip_range[0]), float(self.clip_range[1])
+            recon = np.clip(recon, lo, hi)
+
+        return recon.astype(self.target_dtype, copy=False)
+
+    def _convert_gt_hu_to_mu(self, gt: np.ndarray) -> np.ndarray:
+        if not self.gt_hu_to_mu_enabled:
+            return gt
+        lo, hi = self.gt_hu_clip
+        gt_clipped = np.clip(gt, lo, hi).astype(np.float32, copy=False)
+        return self.gt_mu_water * (1.0 + gt_clipped / 1000.0)
+
+    def _save_outputs(
+        self,
+        recon: np.ndarray,
+        case_id: str | int | None,
+        ground_truth: np.ndarray | None,
+    ) -> None:
+        io_cfg = self.io_cfg
+
+        out_root_tpl = io_cfg.get("out_root", "outputs/FBP/{dataset_name}")
+        out_root = Path(out_root_tpl.format(dataset_name=self.dataset_name))
+        out_root.mkdir(parents=True, exist_ok=True)
+
+        ang_cfg = self.cfg["projection"]["angles"]
+        stop_deg = float(ang_cfg.get("stop_deg", 180.0))
+        step_deg = float(ang_cfg.get("step_deg", 1.0))
+
         case_id_safe = str(case_id) if case_id not in (None, "", "None") else "nocase"
 
-        # groundtruth 目录改成带 case_id
-        gt_dir = out_root / f"groundtruth_{case_id_safe}"
-        gt_dir.mkdir(parents=True, exist_ok=True)
+        prefix_tpl = io_cfg.get("case_prefix", "recon_{case_id}_{stop}@{step}")
+        prefix = prefix_tpl.format(
+            case_id=case_id_safe,
+            stop=_fmt_num(stop_deg),
+            step=_fmt_num(step_deg),
+        )
 
-        S = gt.shape[0]
-        for s in range(S):
-            v = gt[s]
-            vmin, vmax = float(np.min(v)), float(np.max(v))
-            if vmax > vmin:
-                v_norm = (v - vmin) / (vmax - vmin)
+        save_numpy_flag = io_cfg.get("save_numpy_all")
+        if save_numpy_flag is None:
+            save_numpy_flag = io_cfg.get("save_npz_all", True)
+        if bool(save_numpy_flag):
+            save_numpy_dir_tpl = io_cfg.get(
+                "save_numpy_dir",
+                io_cfg.get("save_npz_dir", "data/interim/recon/{dataset_name}")
+            )
+            save_numpy_dir = Path(save_numpy_dir_tpl.format(dataset_name=self.dataset_name))
+            save_numpy_dir.mkdir(parents=True, exist_ok=True)
+            out_path = save_numpy_dir / f"{prefix}.npy"
+            np.save(out_path, recon)
+            print(f"[FBP] Saved reconstruction array to: {out_path}")
+
+        if bool(io_cfg.get("save_png_each_slice", True)):
+            if iio is None:
+                print("[FBP] imageio 未安装，跳过 PNG 保存")
             else:
-                v_norm = np.zeros_like(v, dtype=np.float32)
-            v_u8 = (v_norm * 255.0 + 0.5).astype(np.uint8)
-            iio.imwrite(gt_dir / f"{s:04d}.png", v_u8)
+                png_dir = out_root / f"recon_{case_id_safe}" / prefix
+                png_dir.mkdir(parents=True, exist_ok=True)
 
-        print(f"[FBP] Saved ground truth PNG slices to: {gt_dir}")
+                arr = recon
+                if arr.dtype.kind in "fc":
+                    arr_to_write = (np.clip(arr, 0, 1) * 255.0).astype(np.uint8)
+                else:
+                    arr_to_write = arr
 
+                for s in range(arr.shape[0]):
+                    iio.imwrite(png_dir / f"{s:04d}.png", arr_to_write[s])
+
+                print(f"[FBP] Saved PNG slices to: {png_dir}")
+
+        if ground_truth is not None and iio is not None:
+            gt = np.asarray(ground_truth, dtype=np.float32)
+            if gt.ndim != 3:
+                raise ValueError(f"ground_truth_zyx must be [S,H,W], got shape {gt.shape}")
+
+            gt_mu = self._convert_gt_hu_to_mu(gt)
+
+            gt_dir = out_root / f"groundtruth_{case_id_safe}"
+            gt_dir.mkdir(parents=True, exist_ok=True)
+
+            for s in range(gt_mu.shape[0]):
+                v = gt_mu[s]
+                vmin, vmax = float(np.min(v)), float(np.max(v))
+                if vmax > vmin:
+                    v_norm = (v - vmin) / (vmax - vmin)
+                else:
+                    v_norm = np.zeros_like(v, dtype=np.float32)
+                v_u8 = (v_norm * 255.0 + 0.5).astype(np.uint8)
+                iio.imwrite(gt_dir / f"{s:04d}.png", v_u8)
+
+            print(f"[FBP] Saved ground truth PNG slices to: {gt_dir}")
 
 
 def fbp_reconstruct_with_astra(
@@ -553,104 +547,5 @@ def fbp_reconstruct_with_astra(
     - spacing_dzyx: 可选 (dz,dy,dx)。若提供，将用于构建 vol_geom 的物理范围；否则尝试从 cfg.data.spacing 读取；再否则用简写 vol_geom。
     - 返回: [S, H, W]
     """
-    assert sino_SAD.ndim == 3, "sino must be [S, A, D]"
-    S, A, D = sino_SAD.shape
-
-    # 角度/几何
-    angles = _angles_from_default(cfg_merged)
-    if angles.shape[0] != A:
-        raise ValueError(f"[angles] length {angles.shape[0]} != sino A {A}")
-
-    proj_geom = _proj_geom_from_default(cfg_merged, angles, sino_D=D, spacing_dzyx=spacing_dzyx)
-
-    # ---- 解析 dy, dx：优先用入参 spacing_dzyx；否则尝试 cfg.data.spacing（order='dzyx'） ----
-    dy_mm = dx_mm = None
-    if spacing_dzyx is not None:
-        if len(spacing_dzyx) != 3:
-            raise ValueError("spacing_dzyx must be (dz,dy,dx)")
-        dy_mm = float(spacing_dzyx[1]); dx_mm = float(spacing_dzyx[2])
-    else:
-        data_sp = cfg_merged.get("data", {}).get("spacing", {})
-        if bool(data_sp.get("enabled", False)) and str(data_sp.get("order", "")).lower() == "dzyx":
-            vals = data_sp.get("values", None)
-            if isinstance(vals, (list, tuple)) and len(vals) == 3:
-                dy_mm = float(vals[1]); dx_mm = float(vals[2])
-
-    vol_geom  = _vol_geom_from_fbp(cfg_merged, dy_mm=dy_mm, dx_mm=dx_mm)
-    algo, projector = _algo_and_projector(cfg_merged)
-
-    # 预创建投影器
-    projector_id = astra.create_projector(projector, proj_geom, vol_geom)
-
-    fil = _get_from(cfg_merged, ("fbp.filter",))
-    ss  = _get_from(cfg_merged, ("fbp.short_scan",))
-
-    # Parker / Cosine（向后兼容 projection.astra.*）
-    proj_astra_opts = _get_from(cfg_merged, ("projection.astra",), default={})
-    parker_from_proj  = bool(proj_astra_opts.get("parker_weighting", False))
-    cosine_from_proj  = bool(proj_astra_opts.get("cosine_weight", False))  # 占位
-    short_scan_enabled = bool(ss.get("enabled", False)) or parker_from_proj
-    pixel_ss = int(ss.get("pixel_supersampling", 1))
-
-    H = vol_geom["GridRowCount"]; W = vol_geom["GridColCount"]
-    recon = np.zeros((S, H, W), dtype=np.float32)
-
-    for s in range(S):
-        sino_AD = np.asarray(sino_SAD[s], dtype=np.float32)  # [A, D]
-        if sino_AD.shape != (A, D):
-            # 保险：如果是 [D, A] 就转置
-            if sino_AD.shape == (D, A):
-                sino_AD = sino_AD.T
-            else:
-                raise ValueError(f"Unexpected slice sino shape: {sino_AD.shape}, expect {(A, D)}")
-
-        sinogram_id = astra.data2d.create('-sino', proj_geom, sino_AD)
-        recon_id    = astra.data2d.create('-vol',  vol_geom)
-
-        cfg = astra.astra_dict(algo)
-        cfg["ProjectionDataId"]     = sinogram_id
-        cfg["ReconstructionDataId"] = recon_id
-        cfg["ProjectorId"] = projector_id
-
-        # 过滤器/短扫描选项（字段名按 ASTRA FBP/FBP_CUDA）
-        if fil.get("type"):
-            cfg.setdefault("option", {})
-            cfg["option"]["FilterType"] = fil["type"]
-            if fil.get("d_param") is not None:
-                cfg["option"]["FilterD"] = float(fil["d_param"])
-            if fil.get("parameter") is not None:
-                cfg["option"]["FilterParameter"] = float(fil["parameter"])
-
-        # Parker 短扫描：任一来源为真都启用（ASTRA 内部即应用 Parker weighting）
-        if short_scan_enabled:
-            cfg.setdefault("option", {})
-            cfg["option"]["ShortScan"] = True
-
-        # 像素超采样（抗走样）
-        if pixel_ss > 1:
-            cfg.setdefault("option", {})
-            cfg["option"]["PixelSuperSampling"] = pixel_ss
-
-        # 余弦加权：ASTRA 的 fan-beam FBP 内部会做，保留占位不额外手搓
-        # if cosine_from_proj: pass
-
-        alg_id = astra.algorithm.create(cfg)
-        astra.algorithm.run(alg_id)
-
-        recon[s] = astra.data2d.get(recon_id).astype(np.float32, copy=False)
-
-        # 清理 slice 级资源
-        astra.algorithm.delete(alg_id)
-        astra.data2d.delete(sinogram_id)
-        astra.data2d.delete(recon_id)
-
-    # 清理 projector
-    astra.projector.delete(projector_id)
-
-    # 后处理（遮罩/归一化/裁剪/dtype）
-    recon = _apply_post(recon, cfg_merged)
-
-    # 保存（按开关）+ Ground Truth（只 PNG）
-    _save_outputs(recon, cfg_merged, case_id=case_id, ground_truth_zyx=ground_truth_zyx)
-
-    return recon
+    pipeline = _FBPReconstructionPipeline(cfg_merged, spacing_dzyx)
+    return pipeline.run(sino_SAD, case_id=case_id, ground_truth=ground_truth_zyx)

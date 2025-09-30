@@ -1,100 +1,35 @@
 project:
-  name: "ddpm_chest"                   # 项目名称
-  device: "cuda"                       # 设备: A100 GPU
+  device: "cuda"
+  seed: 42
 
-# 数据集 [dataset]
 data:
-  dataset_name: "chest"                # 数据集名称，用于输出路径
-  
-  # 方法1: 手动指定患者分组 (推荐)
-  train_patient_ids: ["2", "3", "5"]  # 明确指定用于训练的患者
-  val_patient_ids: ["4"]              # 明确指定用于验证的患者  
-  test_patient_ids: ["1"]             # 明确指定用于测试的患者
-  
-  # 方法2: 自动划分 (如果上面的配置存在，会优先使用上面的)
-  patient_ids: ["1", "2", "3", "4", "5"]  # 患者ID列表
-  train_ratio: 0.7                     # 训练集比例
-  val_ratio: 0.2                       # 验证集比例
-  test_ratio: 0.1                      # 测试集比例
-  
-  # 图像处理参数
-  image_size: 512                      # 训练分辨率 [resolution]
-  num_channels: 1                      # CT slice 通常为单通道
-  centered: false                      # 数据是否以0为中心 ([-1,1] vs [0,1])
-  
-  # HU处理参数
-  use_mu: true                         # 是否将HU转换为mu值
-  mu_water: 0.02                       # 水的线衰减系数 (mm^-1)
-  hu_clip_range: [-1000, 1000]        # HU值裁剪范围
-  
-  # 数据增强
-  data_augmentation: true              # 是否启用数据增强
-  random_flip: true                    # 随机翻转
-  random_rot90: false                  # 医学图像可按需关闭随机旋转
-  
-  # 数据加载 (512x512优化)
-  batch_size: 8                        # 批大小 (512x512优化：32->8)
-  num_workers: 8                       # 数据加载进程数 (减少内存占用)
-  pin_memory: true                     # 是否使用固定内存
-  cache_volumes: true                  # 是否缓存体数据
+  modality: "CT"
+  patient_ids: ["1", "2", "3", "4", "5"]
+  split_counts:
+    train: 4   # change these numbers to control train/val/test patient counts
+    val: 1
+    test: 0
+  image_size: 512
+  channels: 1
+  centered: true   # if true, images are in [-1, 1]; if false, images are in [0, 1]
+  use_mu: true
+  mu_water: 0.02
+  hu_clip_range: [-1024, 4000]
+  batch_size: 8
+  num_workers: 4
+  pin_memory: true
 
-
-# 模型 [model] (512x512优化)
-model:
-  nf: 64                               # base channels (减少以节省内存)
-  ch_mult: [1, 1, 2, 2]               # 每层通道倍率 (减少早期层通道数)
-  num_res_blocks: 2                   # 每个分辨率层的残差块数量
-  attn_resolutions: [32]               # 启用注意力机制的分辨率层 (减少注意力层)
-  dropout: 0.0                        # dropout rate
-  resamp_with_conv: true             # 上下采样是否使用卷积
-  conditional: true                   # 是否条件生成（时间步嵌入）
-  scale_by_sigma: false              # 是否用sigma缩放输出
-
-
-# 扩散过程 [diffusion]
 diffusion:
-  steps: 1000                          # T
-  beta_schedule: cosine                # {linear, cosine}
-  beta_start: 1.0e-4                   # 仅当 linear 时生效
-  beta_end: 0.02
-  objective: eps                       # 预测噪声 ε；可选 x0
-  sample_steps: 100                    # 采样时步数（可用 DDIM）增加到100
-  sampler: ddim                        # {ddpm, ddim}
-  eta: 0.1                             # DDIM 温度（0.1 = 轻微随机性）
+  steps: 1000
+  sample_steps: 100
+  eta: 0.0
+  ddim:
+    preview_t0: 400          # time step used when creating "Noisy t=..." previews
+    preview_steps: 50        # DDIM reverse steps for the preview denoising loop
+    sample_batch: 4          # number of samples saved in samples_epoch_*.png
 
-
-# 训练 [training] (512x512优化)
 training:
-  max_epochs: 150                      # 最大训练轮数
-  batch_size: 8                        # 批大小 (512x512优化)
-  log_interval: 100                    # 日志记录间隔
-  val_interval: 1                      # 验证间隔(epochs)
-  save_interval: 10                    # 模型保存间隔(epochs)
-  
-  # 混合精度训练
-  amp: true                            # 启用混合精度
-  
-  # EMA (指数移动平均)
-  ema:
-    use_ema: true                      # 是否使用EMA
-    decay: 0.9999                      # EMA衰减率
-  
-  # 输出路径 (支持变量替换)
-  output_dir: "outputs/ddpm/${data.dataset_name}"
-  checkpoint_dir: "${training.output_dir}/checkpoints"
-  sample_dir: "${training.output_dir}/samples"
-  log_dir: "${training.output_dir}/logs"
-
-
-# 优化器 [optimizer] (512x512优化)
-optimizer:
-  name: adamw
-  lr: 1.5e-4                           # 512x512优化：适应更小batch_size
-  betas: [0.9, 0.999]
-  weight_decay: 1.0e-4                 # A100优化：轻微正则化
-
-
-# 学习率调度 [lr scheduler]
-scheduler:
-  name: cosine
-  warmup_steps: 1000
+  epochs: 500
+  lr: 2.0e-4
+  save_interval: 10
+  output_dir: "outputs/ddpm/chest"

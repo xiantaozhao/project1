@@ -1,61 +1,6 @@
 # configs/FBP/chest.yaml
 inherit_from: "configs/default/chest.yaml"
 
-projection:
-  task: "forward"
-  slice_axis: "z"        # 按 z 切
-  slice_stride: 1
-  output_order: "SxAxD"  # 输出维度顺序：S=Slice, A=Angle(°), D=Detector
-  dtype: "float32"
-
-  # 角度（用 step，而不是 count）
-  angles:
-    mode: "range_step"        # range_step = 用步长
-    start_deg: 0.0
-    stop_deg: 180.0           # 半扫描/有限角随便设；闭区间与否看 include_endpoint
-    step_deg: 0.25            # 由你控制角度分辨率
-    include_endpoint: true   # 等价于 np.arange(..., endpoint=)
-
-  # 几何（fanflat，标量版）
-  geom:
-    type: "fanflat"
-    # 探测器参数：按“图片本身数据”自动推断（见下面的逻辑）
-    det:
-      from_image: false        # 若 true：det_count = 图像宽度（X），det_pixel_mm = dx
-      det_count: 1000          # 当 from_image=false 时生效
-      det_pixel_mm: 0.7
-    # 距离参数
-    source_origin_mm: 1000.0   # DSO
-    origin_det_mm: 600.0      # ODD
-
-  # 单位/预处理
-  volume:
-    input_units: "auto"       # auto / HU / mu / gray
-    axis_order: "auto"        # auto 则按 data.name 推断（chest=zyx, other=xyz）
-    hu_to_mu:
-      enabled: true
-      mu_water_mm_inv: 0.02
-      hu_clip: [-3000, 4000]
-
-  # ASTRA/执行
-  astra:
-    projector_2d: "cuda"      # cuda / line
-    batch_slices: 16          # 默认 16，按显存可在 YAML 里改
-    pad_to_fov: true         # 消除伪影
-    cosine_weight: true
-    parker_weighting: false
-
-  # 保存
-  save:
-    enabled: true
-    dir: "data/interim/proj/{dataset_name}"
-    filename: "chest_{case_id}_{range}.npy"   # {range} 例如 "180@3"
-    pngs:
-      enabled: false          # 开关：是否导出每角度 PNG
-      height: 1              # PNG 的高度（=1 表示“原始一行投影”；>1 会做竖向重复以便可视）
-      normalize: "minmax"   # "percentile" | "minmax"
-      percentiles: [0.5, 99.5]  # 百分位裁剪（仅在 normalize=percentile 时使用）
-
 
 fbp:
   # 算法/设备
@@ -71,10 +16,10 @@ fbp:
 
   # FBP 滤波器（可在这儿调参；默认 Ram-Lak）
   filter:
-    type: "Ram-Lak"         # 可切: shepp-logan/cosine/hamming/hann/...
+    type: "Shepp-Logan"    # 对肺部更平衡：抑制高频噪声同时保留边缘
     d_param: null           # 针对部分滤波器的 D 参数
     parameter: null         # 针对部分滤波器的附加参数
-    cutoff: 0.9             # 频率缩放(可 <1.0 略降噪)
+    cutoff: 0.85            # 略微压低噪声；如想更锐利可提到 0.95-1.0
 
   # 短扫描（有限角<180°时这里一般不开；需要 Parker 再启用）
   short_scan:
@@ -83,18 +28,20 @@ fbp:
 
   # 输出/后处理
   post:
-    normalize: "minmax"  # 先归一化到 [0,1]（全局）
-    # normalize: "percentile"  # 显示/落盘的归一化策略
-    percentiles: [1.0, 95.0] # 抑制少量极亮条纹的影响
+    normalize: "minmax_per_slice"           # 直接按 HU 范围映射，保持器官对比
+    fixed_range: [-1024.0, 4000.0] # 常用肺窗范围，可按需求微调
+    percentiles: [1.0, 95.0]      # 若切换到 percentile 模式时使用
     scale: 1.0
-    clip: [0.0, 1.0]               # 灰度范围
+    clip: [0.0, 1.0]              # 归一化后范围
     dtype: "float32"
+    mask_circle: false             # 去掉方形伪影
+    mask_radius_factor: 0.99      # 保留极小边缘余量
 
   # 保存选项
   io:
     out_root: "outputs/FBP/{dataset_name}"        # 统一输出目录
-    save_npz_all: true             # 保存整体重建到 .npz
-    save_npz_dir: "data/interim/recon/{dataset_name}"
+    save_numpy_all: true           # 保存整体重建到 .npy
+    save_numpy_dir: "data/interim/recon/{dataset_name}"
     save_png_each_slice: true      # 逐 slice 存 PNG
     png_cmap: "gray"               # 可改其他 cmap；仅用于可视化
     case_prefix: "recon_{case_id}_{stop}@{step}"   # 文件名前缀模板 

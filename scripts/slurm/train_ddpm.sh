@@ -1,5 +1,5 @@
 #!/bin/bash -l
-#SBATCH --job-name=ddpm-chest-simple
+#SBATCH --job-name=ddpm-chest
 #SBATCH -p Quick 
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
@@ -21,7 +21,7 @@ CONDA_ENV=proj
 conda activate "$CONDA_ENV"
 
 # 运行训练（不加任何参数）
-python scripts/train_simple_ddpm.py
+python scripts/train_ddpm.py
 
 # 运行推理（仅指定一个 patient_id=1；其余走脚本默认值）
-python scripts/restore_from_npz.py --patient_id 1
+python scripts/restore_ddpm.py --patient_id 1

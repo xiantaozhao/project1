@@ -102,7 +102,37 @@ def _normalize_arrays(gt: np.ndarray, rec: np.ndarray) -> Tuple[np.ndarray, np.n
     return gt_normalized, rec_normalized
 
 
-def _compute_slice_metrics(gt_slice: np.ndarray, rec_slice: np.ndarray) -> Tuple[float, float]:
+def _extract_hu_to_mu_params(cfg: Optional[Dict]) -> Tuple[bool, float, float, float]:
+    """从配置中提取 HU→μ 转换参数（enabled, mu_water, clip_lo, clip_hi）。"""
+    projection = (cfg or {}).get("projection", {})
+    volume_cfg = projection.get("volume", {}) if isinstance(projection, dict) else {}
+    hu_cfg = volume_cfg.get("hu_to_mu", {}) if isinstance(volume_cfg, dict) else {}
+
+    enabled = bool(hu_cfg.get("enabled", False))
+    mu_water = float(hu_cfg.get("mu_water_mm_inv", 0.02))
+    clip_vals = hu_cfg.get("hu_clip", [-1024.0, 3071.0])
+    if isinstance(clip_vals, (list, tuple)) and len(clip_vals) >= 2:
+        clip_lo, clip_hi = float(clip_vals[0]), float(clip_vals[1])
+    else:
+        clip_lo, clip_hi = -1024.0, 3071.0
+    return enabled, mu_water, clip_lo, clip_hi
+
+
+def _hu_to_mu(array: np.ndarray, params: Tuple[bool, float, float, float]) -> np.ndarray:
+    """按给定参数将 HU 数组裁剪并转换为 μ（若 disabled 则原样返回）。"""
+    enabled, mu_water, clip_lo, clip_hi = params
+    if not enabled:
+        return array.astype(np.float32, copy=False)
+    arr = np.array(array, dtype=np.float32, copy=False)
+    arr = np.clip(arr, clip_lo, clip_hi, out=arr)
+    return mu_water * (1.0 + arr / 1000.0)
+
+
+def _compute_slice_metrics(
+    gt_slice: np.ndarray,
+    rec_slice: np.ndarray,
+    mask: Optional[np.ndarray] = None
+) -> Tuple[float, float]:
     """
     计算单个切片的SSIM和PSNR
     
@@ -113,28 +143,59 @@ def _compute_slice_metrics(gt_slice: np.ndarray, rec_slice: np.ndarray) -> Tuple
     Returns:
         (ssim_value, psnr_value)元组
     """
-    # 计算SSIM
-    ssim_value = ssim(
+    mask = None if mask is None else mask.astype(bool, copy=False)
+
+    if mask is None:
+        # 计算SSIM
+        ssim_value = ssim(
+            gt_slice, rec_slice,
+            data_range=1.0,
+            gaussian_weights=False,
+            use_sample_covariance=True,
+            win_size=None
+        )
+
+        # 计算PSNR
+        psnr_value = psnr(gt_slice, rec_slice, data_range=1.0)
+        return float(ssim_value), float(psnr_value)
+
+    # 带掩膜的 SSIM：计算完整 SSIM 图后对掩膜区域求平均
+    ssim_full = ssim(
         gt_slice, rec_slice,
-        data_range=1.0,                    # 数据范围[0,1]
-        gaussian_weights=False,            # 不使用高斯权重
-        use_sample_covariance=True,        # 使用样本协方差
-        win_size=None                      # 使用默认窗口大小
+        data_range=1.0,
+        gaussian_weights=False,
+        use_sample_covariance=True,
+        win_size=None,
+        full=True
     )
-    
-    # 计算PSNR
-    psnr_value = psnr(gt_slice, rec_slice, data_range=1.0)
-    
+    _, ssim_map = ssim_full if isinstance(ssim_full, tuple) else (None, ssim_full)
+    mask_sum = mask.sum()
+    if mask_sum == 0:
+        ssim_value = float("nan")
+    else:
+        ssim_value = float((ssim_map * mask).sum() / mask_sum)
+
+    # 带掩膜的 PSNR：在掩膜区域计算 MSE
+    diff = (gt_slice - rec_slice) * mask
+    mse = float(np.sum(diff * diff) / mask_sum) if mask_sum > 0 else float("nan")
+    if mse == 0:
+        psnr_value = float("inf")
+    elif not np.isfinite(mse) or mse <= 0:
+        psnr_value = float("nan")
+    else:
+        psnr_value = float(10.0 * np.log10(1.0 / mse))
+
     return float(ssim_value), float(psnr_value)
 
 
 def _save_results(
-    ssim_list: np.ndarray, 
-    psnr_list: np.ndarray, 
-    save_dir: Path, 
-    stem: str, 
-    case_id: Union[str, int], 
-    shape: Tuple[int, int, int]
+    ssim_list: np.ndarray,
+    psnr_list: np.ndarray,
+    save_dir: Path,
+    stem: str,
+    case_id: Union[str, int],
+    shape: Tuple[int, int, int],
+    mask_info: Dict
 ) -> None:
     """
     保存计算结果到文件
@@ -178,6 +239,14 @@ def _save_results(
         f.write("Normalization: global min-max to [0,1]\n")
         f.write("SSIM settings: data_range=1.0, gaussian_weights=False\n")
         f.write("PSNR settings: data_range=1.0\n")
+        f.write(
+            "Mask: "
+            f"{mask_info.get('type', 'full')} (ratio={mask_info.get('center_circle_ratio')})\n"
+        )
+        if mask_info.get("type") == "circle":
+            f.write(
+                f"Mask diameter (pixels): {mask_info.get('diameter_pixels'):.2f}\n"
+            )
     
     print(f"[Metrics] Results saved to {result_dir} (stem={stem})")
 
@@ -224,28 +293,81 @@ def evaluate_ssim_psnr(
     # 1. 检查输入数据形状
     shape = _check_shapes(gt, rec)
     S, H, W = shape
-    
-    # 2. 数据归一化
-    gt_normalized, rec_normalized = _normalize_arrays(gt, rec)
-    
-    # 3. 初始化结果数组
+
+    # 2. 根据数值范围判定是否需要将 HU 转换为 μ
+    gt_float = gt.astype(np.float32, copy=False)
+    rec_float = rec.astype(np.float32, copy=False)
+
+    gt_min_val = float(np.min(gt_float))
+    rec_min_val = float(np.min(rec_float))
+
+    enabled, mu_water, clip_lo, clip_hi = _extract_hu_to_mu_params(cfg)
+    hu_params = (True, mu_water, clip_lo, clip_hi)
+
+    if gt_min_val < -500.0:
+        gt_proc = _hu_to_mu(gt_float, hu_params)
+    else:
+        gt_proc = gt_float
+
+    if rec_min_val < -500.0:
+        rec_proc = _hu_to_mu(rec_float, hu_params)
+    else:
+        rec_proc = rec_float
+
+    # 3. 数据归一化
+    gt_normalized, rec_normalized = _normalize_arrays(gt_proc, rec_proc)
+
+    # 3.1. 构造圆形掩膜（若提供 center_circle_ratio）
+    mask_ratio = None
+    mask_2d = None
+    mask_info: Dict[str, Union[str, float, None]] = {
+        "type": "full",
+        "center_circle_ratio": None,
+        "diameter_pixels": float(min(H, W))
+    }
+    if center_circle_ratio is not None:
+        try:
+            mask_ratio = max(0.0, float(center_circle_ratio))
+        except (TypeError, ValueError):
+            mask_ratio = None
+        if mask_ratio is not None and mask_ratio > 0:
+            diameter = min(H, W) * min(mask_ratio, 1.0)
+            radius = diameter / 2.0
+            yy, xx = np.ogrid[:H, :W]
+            cy, cx = (H - 1) / 2.0, (W - 1) / 2.0
+            mask_2d = ((yy - cy) ** 2 + (xx - cx) ** 2) <= radius ** 2
+            mask_info = {
+                "type": "circle",
+                "center_circle_ratio": float(min(mask_ratio, 1.0)),
+                "diameter_pixels": float(diameter)
+            }
+        else:
+            mask_2d = np.zeros((H, W), dtype=bool)
+            mask_info = {
+                "type": "circle",
+                "center_circle_ratio": 0.0,
+                "diameter_pixels": 0.0
+            }
+
+    # 4. 初始化结果数组
     ssim_list = np.zeros(S, dtype=np.float32)
     psnr_list = np.zeros(S, dtype=np.float32)
     
-    # 4. 逐切片计算指标
+    # 5. 逐切片计算指标
     for slice_idx in range(S):
         ssim_val, psnr_val = _compute_slice_metrics(
-            gt_normalized[slice_idx], 
-            rec_normalized[slice_idx]
+            gt_normalized[slice_idx],
+            rec_normalized[slice_idx],
+            mask=mask_2d
         )
         ssim_list[slice_idx] = ssim_val
         psnr_list[slice_idx] = psnr_val
     
-    # 5. 计算平均值
+    # 6. 计算平均值
     ssim_mean = float(np.mean(ssim_list))
     psnr_mean = float(np.mean(psnr_list))
     
-    # 6. 构建结果字典
+    # 7. 构建结果字典
     result = {
         "shape": shape,
         "ssim": {
@@ -256,16 +378,13 @@ def evaluate_ssim_psnr(
             "mean": psnr_mean, 
             "per_slice": psnr_list
         },
-        "mask": {
-            "type": "full",
-            "center_circle_ratio": None
-        }  # 为了保持接口兼容性
+        "mask": mask_info
     }
     
-    # 7. 保存结果（如果指定了保存目录）
+    # 8. 保存结果（如果指定了保存目录）
     if save_dir is not None:
         save_path = Path(save_dir)
         stem = _stem_from_cfg(cfg, case_id)
-        _save_results(ssim_list, psnr_list, save_path, stem, case_id, shape)
+        _save_results(ssim_list, psnr_list, save_path, stem, case_id, shape, mask_info)
     
     return result

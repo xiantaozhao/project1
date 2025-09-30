@@ -16,8 +16,7 @@ def _add_repo_root_to_syspath():
 
 _add_repo_root_to_syspath()
 
-from src.simple_ddpm.model import SimpleUNet
-from src.simple_ddpm.diffusion import Diffusion, DDIM
+from src.model.diffusion import SimpleUNet, Diffusion, DDIM
 
 
 def load_npz_volume(npz_path: Path) -> np.ndarray:
@@ -102,10 +101,10 @@ def save_png_(img_hw: torch.Tensor, path: Path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--weights', type=str, default='outputs/simple_ddpm_chest/final_weights.pth')
+    ap.add_argument('--weights', type=str, default='outputs/ddpm/chest/final_weights.pth')
     ap.add_argument('--patient_id', type=str, required=True, help='Patient ID to match files recon_<id>_*.npz')
     ap.add_argument('--recon_root', type=str, default='data/interim/recon/chest', help='Folder containing recon_*.npz')
-    ap.add_argument('--out_root', type=str, default='outputs/simple_ddpm_chest/restore')
+    ap.add_argument('--out_root', type=str, default='outputs/ddpm/chest/restore')
     ap.add_argument('--image_size', type=int, default=512)
     ap.add_argument('--ddim_steps', type=int, default=100)
     ap.add_argument('--t0', type=int, default=400)
