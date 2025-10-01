@@ -19,15 +19,22 @@ _add_repo_root_to_syspath()
 from src.model.diffusion import SimpleUNet, Diffusion, DDIM
 
 
-def load_npz_volume(npz_path: Path) -> np.ndarray:
-    data = np.load(npz_path)
-    # pick the first array-like entry
-    key = next((k for k in data.files), None)
-    if key is None:
-        raise ValueError(f"No arrays found in {npz_path}")
-    arr = data[key]
+def load_volume(volume_path: Path) -> np.ndarray:
+    """Load a 3D volume from either .npz or .npy file."""
+    suffix = volume_path.suffix.lower()
+    if suffix == '.npz':
+        with np.load(volume_path) as data:
+            key = next((k for k in data.files), None)
+            if key is None:
+                raise ValueError(f"No arrays found in {volume_path}")
+            arr = data[key]
+    elif suffix == '.npy':
+        arr = np.load(volume_path)
+    else:
+        raise ValueError(f"Unsupported volume file extension '{suffix}' for {volume_path}")
+
     if arr.ndim != 3:
-        raise ValueError(f"Expected 3D array (Z,H,W); got shape {arr.shape} from key '{key}' in {npz_path}")
+        raise ValueError(f"Expected 3D array (Z,H,W); got shape {arr.shape} in {volume_path}")
     return arr.astype(np.float32)
 
 
@@ -102,24 +109,36 @@ def save_png_(img_hw: torch.Tensor, path: Path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--weights', type=str, default='outputs/ddpm/chest/final_weights.pth')
-    ap.add_argument('--patient_id', type=str, required=True, help='Patient ID to match files recon_<id>_*.npz')
-    ap.add_argument('--recon_root', type=str, default='data/interim/recon/chest', help='Folder containing recon_*.npz')
+    ap.add_argument('--patient_id', type=str, required=True, help='Patient ID to match files recon_<id>_*.(npz|npy)')
+    ap.add_argument('--recon_root', type=str, default='data/interim/recon/chest', help='Folder containing recon volume files')
     ap.add_argument('--out_root', type=str, default='outputs/ddpm/chest/restore')
     ap.add_argument('--image_size', type=int, default=512)
     ap.add_argument('--ddim_steps', type=int, default=100)
-    ap.add_argument('--t0', type=int, default=400)
+    ap.add_argument('--t0', type=int, default=500)
     ap.add_argument('--eta', type=float, default=0.0)
     ap.add_argument('--device', type=str, default='cuda')
+    ap.add_argument('--max_slices', type=int, default=None, help='Optional limit on number of slices processed per volume')
     args = ap.parse_args()
 
-    device = torch.device(args.device if (args.device == 'cuda' and torch.cuda.is_available()) else 'cpu')
+    requested_device = args.device.lower()
+    if requested_device.startswith('cuda'):
+        if torch.cuda.is_available():
+            device = torch.device(args.device)
+        else:
+            print("[INFO] CUDA requested but not available; falling back to CPU")
+            device = torch.device('cpu')
+    else:
+        device = torch.device(args.device)
 
-    # collect .npz files for this patient
+    # collect recon volume files for this patient
     root = Path(args.recon_root)
-    pattern = f"recon_{args.patient_id}_*.npz"
-    files: list[Path] = sorted(root.glob(pattern))
+    patterns = [f"recon_{args.patient_id}_*.npz", f"recon_{args.patient_id}_*.npy"]
+    files: list[Path] = []
+    for pattern in patterns:
+        files.extend(root.glob(pattern))
+    files = sorted(files)
     if not files:
-        print(f"No .npz files found for patient_id={args.patient_id} under {root} (pattern {pattern})")
+        print(f"No recon files found for patient_id={args.patient_id} under {root} (looked for *.npz and *.npy)")
         return
 
     # load model
@@ -141,7 +160,7 @@ def main():
 
     for f in files:
         try:
-            vol = load_npz_volume(f)  # [Z,H,W]
+            vol = load_volume(f)  # [Z,H,W]
         except Exception as e:
             print(f"[WARN] skip {f}: {e}")
             continue
@@ -151,7 +170,8 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
 
         pad = max(4, len(str(max(0, Z-1))))  # dynamic zero padding, at least 4
-        pbar = tqdm(range(Z), desc=f"{f.name} slices")
+        slice_iter = range(Z) if args.max_slices is None else range(min(Z, args.max_slices))
+        pbar = tqdm(slice_iter, desc=f"{f.name} slices")
         for i in pbar:
             sl = vol[i]
             # per-slice min-max to [0,1] to match training

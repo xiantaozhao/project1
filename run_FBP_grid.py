@@ -19,9 +19,9 @@ CASE_ID          = "1"
 MODALITY         = "CT"
 
 STOP_LIST = [60, 90, 120, 180.0]
-STOP_LIST = [180.0]
+# STOP_LIST = [180.0]
 STEP_LIST = [0.25, 1.0, 1.5, 2.0, 2.5, 3.0, 5.0, 10.0]
-STEP_LIST = [0.25]
+# STEP_LIST = [0.25]
 USE_RECON_GT = True  # False 时直接使用 loader 输出的原始 HU 体作为评估基准
 GT_RECON_ROOT = Path("data/interim/recon/chest")
 GT_RECON_STOP_DEG = 360.0

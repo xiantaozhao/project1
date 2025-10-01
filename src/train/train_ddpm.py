@@ -450,8 +450,13 @@ def train_ddpm(cfg: Dict, *, config_path: Path | str | None = None) -> None:
     lr = float(train_cfg.get("lr", 2e-4))
     opt = torch.optim.AdamW(model.parameters(), lr=lr)
 
-    out_dir = Path(train_cfg.get("output_dir", "outputs/ddpm/chest"))
+    out_dir = Path(train_cfg.get("output_dir", "outputs/ddpm/chest/model"))
     out_dir.mkdir(parents=True, exist_ok=True)
+    # create conventional subfolders to match project layout
+    checkpoint_dir = out_dir / "checkpoint"
+    preview_dir = out_dir / "preview"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    preview_dir.mkdir(parents=True, exist_ok=True)
 
     epochs = int(train_cfg.get("epochs", 10))
     save_interval = max(1, int(train_cfg.get("save_interval", 10)))
@@ -525,7 +530,8 @@ def train_ddpm(cfg: Dict, *, config_path: Path | str | None = None) -> None:
 
         torch.save(ckpt, out_dir / "last.pth")
         if epoch % save_interval == 0:
-            torch.save(ckpt, out_dir / f"checkpoint_epoch_{epoch}.pth")
+            # save periodic checkpoints into model/checkpoint/
+            torch.save(ckpt, checkpoint_dir / f"checkpoint_epoch_{epoch}.pth")
 
             model.eval()
             with torch.no_grad():
@@ -538,8 +544,8 @@ def train_ddpm(cfg: Dict, *, config_path: Path | str | None = None) -> None:
                     eta=eta,
                     show_progress=True,
                 )
-            samples_disp = (samples + 1) / 2 if centered else samples
-            samples_disp = samples_disp.clamp(0, 1)
+                samples_disp = (samples + 1) / 2 if centered else samples
+                samples_disp = samples_disp.clamp(0, 1)
             norm_descr = "[-1, 1]" if centered else "[0, 1]"
             sample_title = f"Epoch {epoch} DDIM samples"
             sample_subtitle = (
@@ -548,7 +554,7 @@ def train_ddpm(cfg: Dict, *, config_path: Path | str | None = None) -> None:
             sample_nrow = max(1, math.ceil(sample_batch / 2))
             save_png_grid(
                 samples_disp,
-                out_dir / f"samples_epoch_{epoch}.png",
+                preview_dir / f"samples_epoch_{epoch}.png",
                 nrow=sample_nrow,
                 title=sample_title,
                 subtitle=sample_subtitle,
@@ -594,7 +600,7 @@ def train_ddpm(cfg: Dict, *, config_path: Path | str | None = None) -> None:
                             x0_disp,
                             xt_disp,
                             x_rec_disp,
-                            out_dir / f"epoch_{epoch}_triplet.png",
+                            preview_dir / f"epoch_{epoch}_triplet.png",
                             col_titles=("Ground Truth", f"Noisy t={preview_t0}", "Denoised"),
                             title=f"Epoch {epoch} denoise preview",
                             subtitle=f"t0={preview_t0}, steps={preview_steps}, eta={eta}, scale={norm_descr}",
