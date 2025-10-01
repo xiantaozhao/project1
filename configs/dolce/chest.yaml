@@ -1,0 +1,129 @@
+# DOLCE Configuration for Chest CT
+# Data-consistent Optimization for Limited-angle CT Enhancement
+
+project:
+  device: "cuda"
+  seed: 42
+  output_dir: "outputs/dolce/chest/model"
+
+data:
+  modality: "CT"
+  patient_ids: ["1", "2", "3", "4", "5"]
+  split_counts:
+    train: 3
+    val: 1
+    test: 1
+  
+  # Image parameters
+  image_size: 512
+  channels: 1
+  centered: true   # Images in [-1, 1] for better training stability
+  use_mu: true
+  mu_water: 0.02
+  hu_clip_range: [-1024, 4000]
+  
+  # Ground truth volume parameters
+  # If gt_volume_path is provided, load from .npy files instead of DICOM
+  gt_volume_path: "data/interim/recon/chest"  # Directory containing ground truth (360°) reconstructions
+  gt_total_angle: 360   # Total angle for ground truth (360° = full scan)
+  gt_angle_step: 0.25   # Angle step for ground truth (0.25° = fine sampling)
+  
+  # Conditional volume paths (if pre-computed)
+  # If not provided, conditions will be generated on-the-fly (slower)
+  fbp_condition_path: "data/interim/recon/chest"  # Directory containing FBP reconstructions
+  rls_condition_path: null  # "data/interim/recon/chest/rls_limited"
+  
+  # Condition file naming parameters
+  # Files are expected to be named: recon_{patient_id}_{total_angle}@{angle_step}.npy
+  # e.g., recon_1_90@1.0.npy or recon_1_60@1.npy
+  condition_total_angle: 90    # Total scanning angle (60, 90, 120, etc.)
+  condition_angle_step: 1.0    # Angle step (1.0, 2.5, 10.0, etc.)
+  
+  # DataLoader
+  batch_size: 8
+  num_workers: 4
+  pin_memory: true
+
+# Model architecture
+model:
+  # UNet parameters
+  model_channels: 128  # Base channel count
+  num_res_blocks: 2    # Residual blocks per resolution
+  channel_mult: [1, 2, 2, 4]  # Channel multipliers for each resolution
+  attention_resolutions: [8, 16]  # Resolutions to apply attention
+  dropout: 0.0
+  
+  # Conditioning
+  use_fbp_condition: true   # Use FBP reconstruction as condition
+  use_rls_condition: false  # Use RLS reconstruction as condition (optional)
+  condition_dropout: 0.1    # Dropout probability for condition during training (regularization)
+
+# Diffusion process
+diffusion:
+  timesteps: 1000
+  beta_schedule: "linear"  # "linear" or "cosine"
+  objective: "pred_noise"  # "pred_noise" or "pred_x0"
+  
+  # Sampling parameters
+  sampler: "ddim"  # "ddpm" or "ddim"
+  ddim_steps: 100
+  eta: 0.0  # 0.0 = deterministic DDIM, 1.0 = stochastic (DDPM-like)
+
+# Training parameters
+training:
+  epochs: 100
+  learning_rate: 1.0e-4  # Lower LR for stability with larger model
+  weight_decay: 0.0
+  grad_clip: 1.0
+  
+  # Resume from checkpoint (optional)
+  # To resume training, set this to the path of your checkpoint file
+  # Example: "outputs/dolce/chest/model/checkpoints/model_epoch_0020.pt"
+  resume_checkpoint: null
+  
+  # Logging and checkpointing
+  save_interval: 50
+  eval_interval: 10
+  log_interval: 100
+
+# CT Geometry (ASTRA)
+geometry:
+  # Fanbeam geometry
+  geometry_type: "fanflat"
+  det_count: 1000
+  det_pixel_mm: 0.7
+  DSO: 1000.0  # Source to origin distance (mm)
+  ODD: 600.0   # Origin to detector distance (mm)
+  
+  # Limited-angle scanning parameters
+  angle_range: 90.0     # Degrees
+  angle_step: 1.0       # Degrees
+  start_angle: 0.0      # Degrees
+
+# Data consistency (proximal solver)
+data_consistency:
+  use_proximal_solver: true
+  solver_type: "apgm"  # "apgm" or "cgrad"
+  rho: 1.0             # Proximal parameter (higher = stronger enforcement)
+  solver_iterations: 10 # Iterations per diffusion step
+  
+  # Rho scheduling (optional)
+  rho_schedule: "timestep"  # "constant" or "timestep"
+  rho_min: 0.1
+  rho_max: 2.0
+
+# Inference/restoration parameters
+inference:
+  # SDEdit-style parameters
+  start_timestep: 500  # Starting noise level (0 to timesteps)
+  
+  # Data consistency
+  use_proximal_solver: true
+  rho: 1.0
+  solver_type: "apgm"
+  solver_iterations: 10
+  
+  # Output
+  save_intermediate: false  # Save x0 predictions at each step
+  save_comparisons: true    # Save comparison images
+  compute_metrics: true     # Compute SSIM, PSNR, etc.

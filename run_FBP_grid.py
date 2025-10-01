@@ -19,10 +19,12 @@ CASE_ID          = "1"
 MODALITY         = "CT"
 
 STOP_LIST = [60, 90, 120, 180.0]
-# STOP_LIST = [180.0]
+# STOP_LIST = [360.0]
+STOP_LIST = [1, 5, 10, 30]
 STEP_LIST = [0.25, 1.0, 1.5, 2.0, 2.5, 3.0, 5.0, 10.0]
+STEP_LIST = [1]
 # STEP_LIST = [0.25]
-USE_RECON_GT = True  # False 时直接使用 loader 输出的原始 HU 体作为评估基准
+USE_RECON_GT = False  # False 时直接使用 loader 输出的原始 HU 体作为评估基准
 GT_RECON_ROOT = Path("data/interim/recon/chest")
 GT_RECON_STOP_DEG = 360.0
 GT_RECON_STEP_DEG = 0.25
@@ -121,31 +123,31 @@ def main():
             cfg_merged=cfg_fbp,
             case_id=case_id,
             spacing_dzyx=spacing_dzyx,
-            ground_truth_zyx=vol_HU_zyx,  # for any internal checks
+            # ground_truth_zyx=vol_HU_zyx,  # for any internal checks
         )
 
-        # ----- Metrics & save -----
-        # dataset_name 来自 data.name
-        dataset_name = cfg_fbp.get("data", {}).get("name", "unknown")
+        # # ----- Metrics & save -----
+        # # dataset_name 来自 data.name
+        # dataset_name = cfg_fbp.get("data", {}).get("name", "unknown")
 
-        # 统一输出目录（支持 {dataset_name}）
-        out_root_tpl = cfg_fbp["fbp"]["io"].get("out_root", "outputs/FBP/{dataset_name}")
-        out_dir = Path(out_root_tpl.format(dataset_name=dataset_name))
-        out_dir.mkdir(parents=True, exist_ok=True)
+        # # 统一输出目录（支持 {dataset_name}）
+        # out_root_tpl = cfg_fbp["fbp"]["io"].get("out_root", "outputs/FBP/{dataset_name}")
+        # out_dir = Path(out_root_tpl.format(dataset_name=dataset_name))
+        # out_dir.mkdir(parents=True, exist_ok=True)
 
 
-        res = evaluate_ssim_psnr(
-            gt=gt_eval,             # [S,H,W]
-            rec=recon,              # [S,H,W]
-            cfg=cfg_fbp,
-            case_id=case_id,
-            save_dir=str(out_dir),
-            center_circle_ratio=1
-        )
+        # res = evaluate_ssim_psnr(
+        #     gt=gt_eval,             # [S,H,W]
+        #     rec=recon,              # [S,H,W]
+        #     cfg=cfg_fbp,
+        #     case_id=case_id,
+        #     save_dir=str(out_dir),
+        #     center_circle_ratio=1
+        # )
 
-        print(f"SSIM(mean): {res['ssim']['mean']:.6f}")
-        print(f"PSNR(mean): {res['psnr']['mean']:.6f}")
-        print(f"[Saved to] {out_dir}")
+        # print(f"SSIM(mean): {res['ssim']['mean']:.6f}")
+        # print(f"PSNR(mean): {res['psnr']['mean']:.6f}")
+        # print(f"[Saved to] {out_dir}")
 
     print("=" * 80)
     print("All runs completed.")

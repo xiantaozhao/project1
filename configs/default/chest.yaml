@@ -53,7 +53,7 @@ projection:
 
   # 保存
   save:
-    enabled: true
+    enabled: false
     dir: "data/interim/proj/{dataset_name}"
     filename: "chest_{case_id}_{range}.npy"   # {range} 例如 "180@3"
     pngs:
